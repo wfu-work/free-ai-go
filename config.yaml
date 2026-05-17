@@ -1,0 +1,34 @@
+system:
+  app-name: "FreeAiGo"
+  addr: 48760
+  db-type: sqlite
+  router-prefix: /api
+jwt:
+  issuer: FreeAiGo
+  signing-key: "change-me"
+  expires-time: 7d
+  buffer-time: 1d
+local:
+  oss-path: ./data/oss
+  proxy-oss-path: /oss
+sqlite:
+  db-name: freeai
+  path: ./data/
+  log-mode: silent
+zap:
+  director: logback
+  level: info
+  prefix: '[FreeAiGo]'
+  retention-day: 7
+freeai:
+  proxy-prefix: /v1
+  default-upstream-base-url: "https://api.openai.com/v1"
+  request-timeout-seconds: 120
+  stream-idle-timeout-seconds: 60
+  max-retries: 1
+  routing-strategy: weighted_round_robin
+  quota-refresh-seconds: 300
+  cooldown-seconds: 300
+  cleanup-log-retention-days: 30
+  secret-key-file: ./data/master.key
+  log-prompt-content: false
