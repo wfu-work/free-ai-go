@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"freeai/services"
+	fmgutils "freeai/utils"
 
 	"github.com/robfig/cron/v3"
 	"github.com/wfu-work/nav-common-go-lib/global"
@@ -21,6 +22,15 @@ func Register(timers commonscheduleds.Timer, options []cron.Option) {
 	_, _ = timers.AddTaskByFunc("freeai", cooldownSpec, func() {
 		if err := services.QuotaServiceApp.RecoverCooldownAccounts(); err != nil {
 			global.NAV_LOG.Warn("recover cooldown accounts failed", zap.Error(err))
+		}
+		if err := services.QuotaServiceApp.RefreshExpiredWindows(""); err != nil {
+			global.NAV_LOG.Warn("refresh expired quota windows failed", zap.Error(err))
+		}
+		if err := services.AccountServiceApp.MarkExpiredSubscriptions(); err != nil {
+			global.NAV_LOG.Warn("mark expired subscriptions failed", zap.Error(err))
+		}
+		if status := fmgutils.CheckMasterKey(cfg.SecretKeyFile); !status.Loaded {
+			global.NAV_LOG.Warn("master key check failed", zap.String("path", status.Path), zap.String("error", status.Error))
 		}
 	}, "recover-cooldown-accounts", options...)
 	_, _ = timers.AddTaskByFunc("freeai", cleanupSpec, func() {

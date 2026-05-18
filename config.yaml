@@ -1,6 +1,6 @@
 system:
   app-name: "FreeAiGo"
-  addr: 48760
+  addr: 8787
   db-type: sqlite
   router-prefix: /api
 jwt:

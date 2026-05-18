@@ -138,21 +138,53 @@ func (s PlatformKeyService) VerifyForModel(header, model string) (domains.Platfo
 	if err != nil {
 		return domains.PlatformKey{}, err
 	}
-	if model != "" && !s.ModelAllowed(key, model) {
-		return domains.PlatformKey{}, errors.New(domains.ErrorModelNotSupported)
+	if model != "" {
+		mapping, findErr := ModelServiceApp.Find(model)
+		if findErr == nil {
+			if !s.ModelMappingAllowed(key, mapping) {
+				return domains.PlatformKey{}, errors.New(domains.ErrorModelNotSupported)
+			}
+			return key, nil
+		}
+		if !s.ModelAllowed(key, model) {
+			return domains.PlatformKey{}, errors.New(domains.ErrorModelNotSupported)
+		}
 	}
 	return key, nil
 }
 
 func (s PlatformKeyService) ModelAllowed(key domains.PlatformKey, model string) bool {
-	raw := strings.TrimSpace(key.AllowedModels)
+	return s.allowedByRules(key.AllowedModels, func(allowed string) bool {
+		return allowed == model || allowed == "*"
+	})
+}
+
+func (s PlatformKeyService) ModelMappingAllowed(key domains.PlatformKey, model domains.ModelMapping) bool {
+	return s.allowedByRules(key.AllowedModels, func(allowed string) bool {
+		switch {
+		case allowed == "*":
+			return true
+		case allowed == model.PublicModel || allowed == model.UpstreamModel:
+			return true
+		case strings.TrimPrefix(allowed, "group:") != allowed:
+			return strings.TrimPrefix(allowed, "group:") == model.AccountGroup
+		case strings.TrimPrefix(allowed, "provider:") != allowed:
+			return strings.TrimPrefix(allowed, "provider:") == model.Provider
+		default:
+			return false
+		}
+	})
+}
+
+func (s PlatformKeyService) allowedByRules(raw string, match func(string) bool) bool {
+	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "*" {
 		return true
 	}
 	var models []string
 	if err := json.Unmarshal([]byte(raw), &models); err == nil {
 		for _, allowed := range models {
-			if strings.TrimSpace(allowed) == model || strings.TrimSpace(allowed) == "*" {
+			if match(strings.TrimSpace(allowed)) {
 				return true
 			}
 		}
@@ -160,7 +192,7 @@ func (s PlatformKeyService) ModelAllowed(key domains.PlatformKey, model string) 
 	}
 	for _, allowed := range strings.Split(raw, ",") {
 		allowed = strings.TrimSpace(allowed)
-		if allowed == model || allowed == "*" {
+		if match(allowed) {
 			return true
 		}
 	}

@@ -1,0 +1,142 @@
+package services
+
+import (
+	"errors"
+	"strings"
+
+	"freeai/domains"
+
+	"github.com/wfu-work/nav-common-go-lib/global"
+	"gorm.io/gorm"
+)
+
+type AccountGroupService struct{}
+
+var AccountGroupServiceApp = AccountGroupService{}
+
+type AccountGroupInput struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Sort        int    `json:"sort"`
+	Enabled     *bool  `json:"enabled"`
+	Remark      string `json:"remark"`
+}
+
+func (s AccountGroupService) Create(input AccountGroupInput) (domains.AccountGroup, error) {
+	input.Name = normalizeAccountGroupName(input.Name)
+	if input.Name == "" {
+		return domains.AccountGroup{}, errors.New("name is required")
+	}
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	entity := domains.AccountGroup{
+		Name:        input.Name,
+		Description: strings.TrimSpace(input.Description),
+		Sort:        input.Sort,
+		Enabled:     enabled,
+		Remark:      input.Remark,
+	}
+	err := global.NAV_DB.Create(&entity).Error
+	AuditServiceApp.Record("", "account_group.create", "account_group", entity.Guid, map[string]string{"name": entity.Name})
+	return entity, err
+}
+
+func (s AccountGroupService) Update(guid string, input AccountGroupInput) (domains.AccountGroup, error) {
+	var entity domains.AccountGroup
+	if err := global.NAV_DB.Where("guid = ?", guid).First(&entity).Error; err != nil {
+		return domains.AccountGroup{}, err
+	}
+	name := normalizeAccountGroupName(input.Name)
+	if name == "" {
+		return domains.AccountGroup{}, errors.New("name is required")
+	}
+	enabled := entity.Enabled
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	updates := map[string]any{
+		"name":        name,
+		"description": strings.TrimSpace(input.Description),
+		"sort":        input.Sort,
+		"enabled":     enabled,
+		"remark":      input.Remark,
+	}
+	if err := global.NAV_DB.Model(&entity).Updates(updates).Error; err != nil {
+		return domains.AccountGroup{}, err
+	}
+	AuditServiceApp.Record("", "account_group.update", "account_group", guid, map[string]string{"name": name})
+	return s.Get(guid)
+}
+
+func (s AccountGroupService) Get(guid string) (domains.AccountGroup, error) {
+	var entity domains.AccountGroup
+	err := global.NAV_DB.Where("guid = ?", guid).First(&entity).Error
+	return entity, err
+}
+
+func (s AccountGroupService) List() ([]domains.AccountGroup, error) {
+	var list []domains.AccountGroup
+	err := global.NAV_DB.Order("sort asc, id asc").Find(&list).Error
+	return list, err
+}
+
+func (s AccountGroupService) Delete(guid string) error {
+	var entity domains.AccountGroup
+	if err := global.NAV_DB.Where("guid = ?", guid).First(&entity).Error; err != nil {
+		return err
+	}
+	var usedAccounts int64
+	_ = global.NAV_DB.Model(&domains.Account{}).Where("account_group = ?", entity.Name).Count(&usedAccounts).Error
+	var usedModels int64
+	_ = global.NAV_DB.Model(&domains.ModelMapping{}).Where("account_group = ?", entity.Name).Count(&usedModels).Error
+	if usedAccounts+usedModels > 0 {
+		return errors.New("account group is in use")
+	}
+	err := global.NAV_DB.Delete(&entity).Error
+	AuditServiceApp.Record("", "account_group.delete", "account_group", guid, map[string]string{"name": entity.Name})
+	return err
+}
+
+func (s AccountGroupService) EnsureDefaults() error {
+	groups := map[string]bool{"default": true}
+	var accounts []domains.Account
+	if err := global.NAV_DB.Select("account_group").Find(&accounts).Error; err == nil {
+		for _, account := range accounts {
+			if name := normalizeAccountGroupName(account.AccountGroup); name != "" {
+				groups[name] = true
+			}
+		}
+	}
+	var models []domains.ModelMapping
+	if err := global.NAV_DB.Select("account_group").Find(&models).Error; err == nil {
+		for _, model := range models {
+			if name := normalizeAccountGroupName(model.AccountGroup); name != "" {
+				groups[name] = true
+			}
+		}
+	}
+	for name := range groups {
+		var entity domains.AccountGroup
+		err := global.NAV_DB.Where("name = ?", name).First(&entity).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if _, createErr := s.Create(AccountGroupInput{Name: name}); createErr != nil {
+				return createErr
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeAccountGroupName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	return value
+}

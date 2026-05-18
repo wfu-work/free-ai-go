@@ -277,21 +277,33 @@ func writeStreamEvent(w io.Writer, req ProxyRequest, event proxydomains.StreamEv
 		return err
 	}
 	delta := event.TextDelta()
+	if completed, ok := event.CompletedResponse(); ok {
+		finishReason := "stop"
+		if completed != nil && len(completed.ToolCalls()) > 0 {
+			finishReason = "tool_calls"
+		}
+		return writeChatCompletionChunk(w, req.Model, map[string]any{}, finishReason)
+	}
 	if delta == "" {
 		return nil
+	}
+	return writeChatCompletionChunk(w, req.Model, map[string]any{"content": delta}, "")
+}
+
+func writeChatCompletionChunk(w io.Writer, model string, delta map[string]any, finishReason any) error {
+	if finishReason == "" {
+		finishReason = nil
 	}
 	chunk := map[string]any{
 		"id":      "chatcmpl-stream",
 		"object":  "chat.completion.chunk",
 		"created": time.Now().Unix(),
-		"model":   req.Model,
+		"model":   model,
 		"choices": []map[string]any{
 			{
-				"index": 0,
-				"delta": map[string]any{
-					"content": delta,
-				},
-				"finish_reason": nil,
+				"index":         0,
+				"delta":         delta,
+				"finish_reason": finishReason,
 			},
 		},
 	}

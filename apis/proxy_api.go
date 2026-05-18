@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"freeai/services"
 
@@ -26,14 +25,16 @@ func (a ProxyApi) Models(c *gin.Context) {
 	}
 	data := make([]gin.H, 0, len(models))
 	for _, model := range models {
-		if !services.PlatformKeyServiceApp.ModelAllowed(key, model.PublicModel) {
+		if !services.PlatformKeyServiceApp.ModelMappingAllowed(key, model) {
 			continue
 		}
-		data = append(data, gin.H{
-			"id":       model.PublicModel,
-			"object":   "model",
-			"owned_by": model.Provider,
-		})
+		for _, name := range services.ModelServiceApp.PublicNames(model) {
+			data = append(data, gin.H{
+				"id":       name,
+				"object":   "model",
+				"owned_by": model.Provider,
+			})
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
@@ -57,9 +58,9 @@ func (a ProxyApi) forward(c *gin.Context, endpoint string) {
 		return
 	}
 	if model := readModel(body); model != "" {
-		c.Request.Header.Set("X-FreeModel-Model", model)
+		c.Request.Header.Set("X-FreeAi-Model", model)
 	}
-	stream := strings.Contains(string(body), `"stream":true`)
+	stream := readStream(body)
 	if stream {
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -104,6 +105,14 @@ func readModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &payload)
 	return payload.Model
+}
+
+func readStream(body []byte) bool {
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &payload)
+	return payload.Stream
 }
 
 func openAIError(code, message string) gin.H {

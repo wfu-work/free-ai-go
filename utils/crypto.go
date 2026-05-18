@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const encryptedPrefix = "aesgcm:"
@@ -34,6 +35,37 @@ func SetSecretKeyFile(path string) {
 		secretKeyState.file = path
 		secretKeyState.key = nil
 	}
+}
+
+type MasterKeyStatus struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	Loaded    bool   `json:"loaded"`
+	Size      int64  `json:"size"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Error     string `json:"error,omitempty"`
+}
+
+func CheckMasterKey(path string) MasterKeyStatus {
+	if strings.TrimSpace(path) == "" {
+		path = secretKeyState.file
+	}
+	status := MasterKeyStatus{Path: path}
+	info, err := os.Stat(path)
+	if err != nil {
+		status.Error = err.Error()
+		return status
+	}
+	status.Exists = true
+	status.Size = info.Size()
+	status.UpdatedAt = info.ModTime().UnixMilli()
+	SetSecretKeyFile(path)
+	if _, err := masterKey(); err != nil {
+		status.Error = err.Error()
+		return status
+	}
+	status.Loaded = true
+	return status
 }
 
 func EncryptSecret(value string) (string, error) {
@@ -111,6 +143,7 @@ func masterKey() ([]byte, error) {
 		if err := os.WriteFile(secretKeyState.file, []byte(base64.RawURLEncoding.EncodeToString(raw)), 0600); err != nil {
 			return nil, err
 		}
+		_ = os.Chtimes(secretKeyState.file, time.Now(), time.Now())
 	} else {
 		raw = []byte(strings.TrimSpace(string(raw)))
 		if decoded, decodeErr := base64.RawURLEncoding.DecodeString(string(raw)); decodeErr == nil && len(decoded) > 0 {

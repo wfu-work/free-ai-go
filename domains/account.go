@@ -7,6 +7,9 @@ type Account struct {
 	Name                  string `json:"name" gorm:"size:100;comment:账号名称"`
 	Email                 string `json:"email" gorm:"size:255;index;comment:邮箱或备注"`
 	Provider              string `json:"provider" gorm:"size:40;index;comment:平台"`
+	APIBaseURL            string `json:"apiBaseUrl" gorm:"size:500;comment:API请求地址"`
+	SupplierName          string `json:"supplierName" gorm:"size:120;comment:供应商名称"`
+	OfficialURL           string `json:"officialUrl" gorm:"size:500;comment:官网链接"`
 	AccountType           string `json:"accountType" gorm:"size:40;index;comment:账号类型"`
 	AuthType              string `json:"authType" gorm:"size:40;comment:认证类型"`
 	EncryptedSecret       string `json:"-" gorm:"comment:加密密钥"`

@@ -1,11 +1,13 @@
 package services
 
 import (
+	"errors"
 	"time"
 
 	"freeai/domains"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	"gorm.io/gorm"
 )
 
 type QuotaService struct{}
@@ -24,6 +26,13 @@ type QuotaInput struct {
 }
 
 func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
+	if input.AccountGuid == "" {
+		return domains.AccountQuota{}, errors.New("accountGuid is required")
+	}
+	if input.WindowType == "" {
+		return domains.AccountQuota{}, errors.New("windowType is required")
+	}
+	input = normalizeQuotaInput(input)
 	if input.Status == "" {
 		input.Status = domains.QuotaStatusUnknown
 	}
@@ -70,6 +79,18 @@ func (s QuotaService) ApplyError(accountGuid, errorType string) {
 		return
 	}
 	_ = AccountServiceApp.MarkFailure(accountGuid, errorType)
+	quotaStatus := ""
+	switch errorType {
+	case domains.ErrorRateLimited:
+		quotaStatus = domains.QuotaStatusLimited
+	case domains.ErrorQuotaExhausted:
+		quotaStatus = domains.QuotaStatusExhausted
+	}
+	if quotaStatus != "" {
+		_ = global.NAV_DB.Model(&domains.AccountQuota{}).
+			Where("account_guid = ?", accountGuid).
+			Update("status", quotaStatus).Error
+	}
 }
 
 func (s QuotaService) ApplyUsage(accountGuid string, inputTokens, outputTokens int64) {
@@ -111,4 +132,68 @@ func (s QuotaService) RecoverCooldownAccounts() error {
 			"cooldown_until": int64(0),
 			"failure_count":  0,
 		}).Error
+}
+
+func (s QuotaService) RefreshExpiredWindows(accountGuid string) error {
+	now := time.Now().UnixMilli()
+	query := global.NAV_DB.Model(&domains.AccountQuota{}).
+		Where("reset_at > 0 AND reset_at <= ?", now)
+	if accountGuid != "" {
+		query = query.Where("account_guid = ?", accountGuid)
+	}
+	return query.Updates(map[string]any{
+		"used_percent":     float64(0),
+		"remaining_tokens": gorm.Expr("total_tokens"),
+		"status":           domains.QuotaStatusAvailable,
+		"reset_at":         int64(0),
+	}).Error
+}
+
+func normalizeQuotaInput(input QuotaInput) QuotaInput {
+	now := time.Now().UnixMilli()
+	if input.TotalTokens > 0 && input.RemainingTokens == 0 && input.UsedPercent == 0 {
+		input.RemainingTokens = input.TotalTokens
+	}
+	if input.TotalTokens > 0 && input.RemainingTokens >= 0 {
+		used := input.TotalTokens - input.RemainingTokens
+		if used < 0 {
+			used = 0
+		}
+		input.UsedPercent = float64(used) / float64(input.TotalTokens) * 100
+	}
+	if input.Status == "" {
+		switch {
+		case input.TotalTokens > 0 && input.RemainingTokens == 0:
+			input.Status = domains.QuotaStatusExhausted
+		default:
+			input.Status = domains.QuotaStatusAvailable
+		}
+	}
+	if input.ResetAt == 0 {
+		input.ResetAt = defaultQuotaResetAt(input.WindowType, now)
+	}
+	if input.NextRefreshAt == 0 {
+		refreshEvery := Config().QuotaRefreshSeconds
+		if refreshEvery <= 0 {
+			refreshEvery = 300
+		}
+		input.NextRefreshAt = time.Now().Add(time.Duration(refreshEvery) * time.Second).UnixMilli()
+	}
+	return input
+}
+
+func defaultQuotaResetAt(windowType string, nowMs int64) int64 {
+	now := time.UnixMilli(nowMs)
+	switch windowType {
+	case "5h", "5_hour", "five_hour":
+		return now.Add(5 * time.Hour).UnixMilli()
+	case "7d", "7_day", "weekly":
+		return now.Add(7 * 24 * time.Hour).UnixMilli()
+	case "daily", "day":
+		return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location()).UnixMilli()
+	case "monthly", "month":
+		return time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location()).UnixMilli()
+	default:
+		return 0
+	}
 }

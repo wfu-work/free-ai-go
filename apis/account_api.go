@@ -89,12 +89,28 @@ func (a AccountApi) Refresh(c *gin.Context) {
 }
 
 func (a AccountApi) Test(c *gin.Context) {
-	result, err := accountService.Test(c.Param("guid"))
+	var input services.AccountTestInput
+	_ = c.ShouldBindJSON(&input)
+	result, err := accountService.Test(c.Param("guid"), input)
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
 	response.Ok(result, c)
+}
+
+func (a AccountApi) FetchModels(c *gin.Context) {
+	var input services.FetchAccountModelsInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	models, err := accountService.FetchModels(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(gin.H{"models": models}, c)
 }
 
 func (a AccountApi) Reorder(c *gin.Context) {

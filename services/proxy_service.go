@@ -25,20 +25,38 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	start := time.Now()
 	modelName := r.URL.Query().Get("model")
 	if modelName == "" {
+		modelName = r.Header.Get("X-FreeAi-Model")
+	}
+	if modelName == "" {
 		modelName = r.Header.Get("X-FreeModel-Model")
 	}
 	platformKey, err := PlatformKeyServiceApp.VerifyForModel(r.Header.Get("Authorization"), modelName)
 	if err != nil {
 		status := http.StatusUnauthorized
+		errorType := domains.ErrorPlatformKeyInvalid
 		if err.Error() == domains.ErrorPlatformKeyLimited {
 			status = http.StatusTooManyRequests
+			errorType = domains.ErrorPlatformKeyLimited
 		}
 		if err.Error() == domains.ErrorModelNotSupported {
 			status = http.StatusForbidden
+			errorType = domains.ErrorModelNotSupported
 		}
+		RequestLogServiceApp.Record(RequestLogInput{
+			Model:      modelName,
+			StatusCode: status,
+			ErrorType:  errorType,
+			LatencyMs:  time.Since(start).Milliseconds(),
+		})
 		return ProxyOutput{StatusCode: status}, err
 	}
 	if modelName == "" {
+		RequestLogServiceApp.Record(RequestLogInput{
+			PlatformKeyID: platformKey.Guid,
+			StatusCode:    http.StatusBadRequest,
+			ErrorType:     domains.ErrorModelNotSupported,
+			LatencyMs:     time.Since(start).Milliseconds(),
+		})
 		return ProxyOutput{StatusCode: http.StatusBadRequest}, errors.New("model is required")
 	}
 
@@ -56,10 +74,19 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		selection, err := RouterServiceApp.SelectExcluding(modelName, excluded)
 		if err != nil {
 			lastErr = err
-			lastOutput = ProxyOutput{StatusCode: http.StatusServiceUnavailable}
+			status := http.StatusServiceUnavailable
+			if err.Error() == domains.ErrorModelNotSupported {
+				status = http.StatusBadRequest
+			}
+			lastOutput = ProxyOutput{StatusCode: status}
 			break
 		}
 		lastSelection = selection
+		if stream && !selection.Model.Stream {
+			lastErr = errors.New(domains.ErrorModelNotSupported + ": stream is not enabled for model")
+			lastOutput = ProxyOutput{StatusCode: http.StatusBadRequest}
+			break
+		}
 		excluded[selection.Account.Guid] = true
 		result, output, err := s.callUpstream(r, w, endpoint, body, stream, selection)
 		lastResult = result
@@ -137,7 +164,7 @@ func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string
 	}
 	provider := ProxyProviderConfig{
 		Name:    selection.Model.Provider,
-		BaseURL: Config().DefaultUpstreamBaseURL,
+		BaseURL: accountBaseURL(selection.Account),
 		WireAPI: "responses",
 	}
 	credential := ProxyCredential{Type: selection.Account.AuthType, Value: secret}

@@ -1,7 +1,9 @@
 package services
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 
 	"freeai/domains"
 
@@ -15,6 +17,7 @@ var ModelServiceApp = ModelService{}
 
 type ModelInput struct {
 	PublicModel   string `json:"publicModel"`
+	Aliases       string `json:"aliases"`
 	UpstreamModel string `json:"upstreamModel"`
 	Provider      string `json:"provider"`
 	AccountGroup  string `json:"accountGroup"`
@@ -31,6 +34,7 @@ func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
 	}
 	entity := domains.ModelMapping{
 		PublicModel:   input.PublicModel,
+		Aliases:       input.Aliases,
 		UpstreamModel: input.UpstreamModel,
 		Provider:      input.Provider,
 		AccountGroup:  input.AccountGroup,
@@ -56,6 +60,7 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	}
 	if err := global.NAV_DB.Model(&model).Updates(map[string]any{
 		"public_model":   input.PublicModel,
+		"aliases":        input.Aliases,
 		"upstream_model": input.UpstreamModel,
 		"provider":       input.Provider,
 		"account_group":  input.AccountGroup,
@@ -93,6 +98,15 @@ func (s ModelService) Find(publicModel string) (domains.ModelMapping, error) {
 	var model domains.ModelMapping
 	err := global.NAV_DB.Where("public_model = ? AND enabled = ?", publicModel, true).First(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		var candidates []domains.ModelMapping
+		if listErr := global.NAV_DB.Where("enabled = ? AND aliases <> ?", true, "").Find(&candidates).Error; listErr != nil {
+			return domains.ModelMapping{}, listErr
+		}
+		for _, candidate := range candidates {
+			if modelAliasMatches(candidate.Aliases, publicModel) {
+				return candidate, nil
+			}
+		}
 		return domains.ModelMapping{}, errors.New(domains.ErrorModelNotSupported)
 	}
 	return model, err
@@ -100,6 +114,51 @@ func (s ModelService) Find(publicModel string) (domains.ModelMapping, error) {
 
 func (s ModelService) SetEnabled(guid string, enabled bool) error {
 	return global.NAV_DB.Model(&domains.ModelMapping{}).Where("guid = ?", guid).Update("enabled", enabled).Error
+}
+
+func (s ModelService) PublicNames(model domains.ModelMapping) []string {
+	names := []string{model.PublicModel}
+	for _, alias := range parseAliases(model.Aliases) {
+		if alias != "" && alias != model.PublicModel {
+			names = append(names, alias)
+		}
+	}
+	return names
+}
+
+func modelAliasMatches(raw, model string) bool {
+	for _, alias := range parseAliases(raw) {
+		if alias == model {
+			return true
+		}
+	}
+	return false
+}
+
+func parseAliases(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var aliases []string
+	if err := json.Unmarshal([]byte(raw), &aliases); err == nil {
+		return normalizeAliases(aliases)
+	}
+	return normalizeAliases(strings.Split(raw, ","))
+}
+
+func normalizeAliases(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func (s ModelService) Delete(guid string) error {

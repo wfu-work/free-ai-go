@@ -42,6 +42,7 @@ func registerTables() {
 	db := global.NAV_DB
 	if err := db.AutoMigrate(
 		domains.Account{},
+		domains.AccountGroup{},
 		domains.AccountQuota{},
 		domains.ModelMapping{},
 		domains.PlatformKey{},

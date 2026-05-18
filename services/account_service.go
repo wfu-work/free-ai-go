@@ -1,8 +1,13 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +26,9 @@ type CreateAccountInput struct {
 	Name                  string `json:"name"`
 	Email                 string `json:"email"`
 	Provider              string `json:"provider"`
+	APIBaseURL            string `json:"apiBaseUrl"`
+	SupplierName          string `json:"supplierName"`
+	OfficialURL           string `json:"officialUrl"`
 	AccountType           string `json:"accountType"`
 	AuthType              string `json:"authType"`
 	Secret                string `json:"secret"`
@@ -42,6 +50,18 @@ type ReorderAccountItem struct {
 	Weight   int    `json:"weight"`
 }
 
+type AccountTestInput struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+}
+
+type FetchAccountModelsInput struct {
+	Provider   string `json:"provider"`
+	APIBaseURL string `json:"apiBaseUrl"`
+	AuthType   string `json:"authType"`
+	Secret     string `json:"secret"`
+}
+
 func (s AccountService) Create(input CreateAccountInput) (domains.Account, error) {
 	if input.Name == "" {
 		return domains.Account{}, errors.New("name is required")
@@ -51,6 +71,9 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 	}
 	if input.Secret == "" {
 		return domains.Account{}, errors.New("secret is required")
+	}
+	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
+		return domains.Account{}, err
 	}
 	if input.AuthType == "" {
 		input.AuthType = domains.AuthTypeBearerToken
@@ -67,6 +90,9 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 		Name:                  input.Name,
 		Email:                 input.Email,
 		Provider:              input.Provider,
+		APIBaseURL:            strings.TrimSpace(input.APIBaseURL),
+		SupplierName:          strings.TrimSpace(input.SupplierName),
+		OfficialURL:           strings.TrimSpace(input.OfficialURL),
 		AccountType:           input.AccountType,
 		AuthType:              input.AuthType,
 		EncryptedSecret:       encrypted,
@@ -90,10 +116,16 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
 		return domains.Account{}, err
 	}
+	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
+		return domains.Account{}, err
+	}
 	updates := map[string]any{
 		"name":                    input.Name,
 		"email":                   input.Email,
 		"provider":                input.Provider,
+		"api_base_url":            strings.TrimSpace(input.APIBaseURL),
+		"supplier_name":           strings.TrimSpace(input.SupplierName),
+		"official_url":            strings.TrimSpace(input.OfficialURL),
 		"account_type":            input.AccountType,
 		"auth_type":               input.AuthType,
 		"supported_models":        input.SupportedModels,
@@ -160,10 +192,11 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 		return domains.Account{}, err
 	}
 	AuditServiceApp.Record("", "account.refresh", "account", guid, nil)
+	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
 	return s.Get(guid)
 }
 
-func (s AccountService) Test(guid string) (map[string]any, error) {
+func (s AccountService) Test(guid string, input AccountTestInput) (map[string]any, error) {
 	account, err := s.Get(guid)
 	if err != nil {
 		return nil, err
@@ -172,7 +205,7 @@ func (s AccountService) Test(guid string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	result := map[string]any{
 		"ok":          secret != "",
 		"provider":    account.Provider,
 		"status":      account.Status,
@@ -180,7 +213,114 @@ func (s AccountService) Test(guid string) (map[string]any, error) {
 		"enabled":     account.Enabled,
 		"modelCount":  len(parseSupportedModels(account.SupportedModels)),
 		"checkedAtMs": time.Now().UnixMilli(),
-	}, nil
+	}
+	if input.Model == "" {
+		return result, nil
+	}
+	model, err := ModelServiceApp.Find(input.Model)
+	if err != nil {
+		if err.Error() != domains.ErrorModelNotSupported {
+			return nil, err
+		}
+		if !supportsModel(account.SupportedModels, input.Model) {
+			return nil, err
+		}
+		model = domains.ModelMapping{
+			PublicModel:   input.Model,
+			UpstreamModel: input.Model,
+			Provider:      account.Provider,
+			AccountGroup:  account.AccountGroup,
+			Stream:        true,
+			TimeoutSec:    int(Config().RequestTimeoutSeconds),
+		}
+	}
+	if model.Provider != account.Provider {
+		return nil, errors.New("model provider does not match account provider")
+	}
+	prompt := input.Prompt
+	if prompt == "" {
+		prompt = "ping"
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": model.PublicModel,
+		"input": prompt,
+		"store": false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	proxyResult, err := ProxyAPIClientApp.Do(ctx, ProxyProviderConfig{
+		Name:    model.Provider,
+		BaseURL: accountBaseURL(account),
+		WireAPI: "responses",
+	}, ProxyCredential{Type: account.AuthType, Value: secret}, ProxyRequest{
+		Endpoint: "/v1/responses",
+		Model:    model.UpstreamModel,
+		Body:     body,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result["upstreamStatusCode"] = proxyResult.StatusCode
+	result["upstreamErrorType"] = proxyResult.ErrorType
+	result["latencyMs"] = proxyResult.LatencyMs
+	result["ok"] = proxyResult.StatusCode >= 200 && proxyResult.StatusCode < 300 && proxyResult.ErrorType == ""
+	if proxyResult.ErrorType != "" {
+		QuotaServiceApp.ApplyError(account.Guid, proxyResult.ErrorType)
+	} else {
+		_ = s.MarkUsed(account.Guid)
+	}
+	return result, nil
+}
+
+func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, error) {
+	secret := strings.TrimSpace(input.Secret)
+	if secret == "" {
+		return nil, errors.New("secret is required")
+	}
+	authType := input.AuthType
+	if authType == "" {
+		authType = domains.AuthTypeBearerToken
+	}
+	baseURL := strings.TrimSpace(input.APIBaseURL)
+	if baseURL == "" {
+		if strings.TrimSpace(input.Provider) == "custom" {
+			return nil, errors.New("apiBaseUrl is required for custom provider")
+		}
+		baseURL = Config().DefaultUpstreamBaseURL
+	}
+	target := strings.TrimRight(baseURL, "/") + normalizeEndpoint("/v1/models", baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	authHeader, err := proxyCredential(ProxyCredential{Type: authType, Value: secret}).AuthorizationHeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", authHeader)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch models failed: upstream returned %d", resp.StatusCode)
+	}
+	models := parseModelListResponse(body)
+	if len(models) == 0 {
+		return nil, errors.New("no models found in upstream response")
+	}
+	sort.Strings(models)
+	return models, nil
 }
 
 func (s AccountService) Reorder(input ReorderAccountInput) error {
@@ -251,6 +391,13 @@ func (s AccountService) MarkFailure(guid, errorType string) error {
 	}).Error
 }
 
+func (s AccountService) MarkExpiredSubscriptions() error {
+	now := time.Now().UnixMilli()
+	return global.NAV_DB.Model(&domains.Account{}).
+		Where("enabled = ? AND subscription_expired_at > 0 AND subscription_expired_at <= ?", true, now).
+		Update("status", domains.AccountStatusExpired).Error
+}
+
 func (s AccountService) DecryptSecret(account domains.Account) (string, error) {
 	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
 	return fmgutils.DecryptSecret(account.EncryptedSecret)
@@ -294,6 +441,58 @@ func parseSupportedModels(raw string) []string {
 	for _, part := range strings.Split(raw, ",") {
 		if model := strings.TrimSpace(part); model != "" {
 			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func validateCustomProvider(provider, apiBaseURL, supplierName, officialURL string) error {
+	if strings.TrimSpace(provider) != "custom" {
+		return nil
+	}
+	if strings.TrimSpace(apiBaseURL) == "" {
+		return errors.New("apiBaseUrl is required for custom provider")
+	}
+	if strings.TrimSpace(supplierName) == "" {
+		return errors.New("supplierName is required for custom provider")
+	}
+	if strings.TrimSpace(officialURL) == "" {
+		return errors.New("officialUrl is required for custom provider")
+	}
+	return nil
+}
+
+func accountBaseURL(account domains.Account) string {
+	if baseURL := strings.TrimSpace(account.APIBaseURL); baseURL != "" {
+		return baseURL
+	}
+	return Config().DefaultUpstreamBaseURL
+}
+
+func parseModelListResponse(body []byte) []string {
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	models := make([]string, 0, len(payload.Data)+len(payload.Models))
+	for _, item := range payload.Data {
+		id := strings.TrimSpace(item.ID)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			models = append(models, id)
+		}
+	}
+	for _, item := range payload.Models {
+		id := strings.TrimSpace(item)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			models = append(models, id)
 		}
 	}
 	return models
