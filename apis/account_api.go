@@ -212,6 +212,20 @@ func (a AccountApi) FetchModels(c *gin.Context) {
 	response.Ok(gin.H{"models": models}, c)
 }
 
+func (a AccountApi) ParseLoginCallback(c *gin.Context) {
+	var input services.LoginCallbackParseInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := accountService.ParseLoginCallback(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
 // Reorder 账号排序
 // @Router /accounts/reorder [post]
 func (a AccountApi) Reorder(c *gin.Context) {

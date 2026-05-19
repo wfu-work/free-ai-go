@@ -20,6 +20,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		routerLogger.POST(":guid/refresh-usage", accountApi.RefreshUsage)
 		routerLogger.POST(":guid/test", accountApi.Test)
 		routerLogger.POST("fetch-models", accountApi.FetchModels)
+		routerLogger.POST("parse-login-callback", accountApi.ParseLoginCallback)
 		routerLogger.POST("reorder", accountApi.Reorder)
 	}
 	{

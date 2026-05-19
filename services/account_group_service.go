@@ -1,8 +1,11 @@
 package services
 
 import (
+	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
+	"time"
 
 	"freeai/domains"
 
@@ -40,6 +43,9 @@ func (s AccountGroupService) Create(input AccountGroupInput) (domains.AccountGro
 		Remark:      input.Remark,
 	}
 	err := global.NAV_DB.Create(&entity).Error
+	if err == nil {
+		_ = s.RefreshSummary(entity.Name)
+	}
 	AuditServiceApp.Record("", "account_group.create", "account_group", entity.Guid, map[string]string{"name": entity.Name})
 	return entity, err
 }
@@ -67,6 +73,10 @@ func (s AccountGroupService) Update(guid string, input AccountGroupInput) (domai
 	if err := global.NAV_DB.Model(&entity).Updates(updates).Error; err != nil {
 		return domains.AccountGroup{}, err
 	}
+	if entity.Name != name {
+		_ = s.RefreshSummary(entity.Name)
+	}
+	_ = s.RefreshSummary(name)
 	AuditServiceApp.Record("", "account_group.update", "account_group", guid, map[string]string{"name": name})
 	return s.Get(guid)
 }
@@ -90,7 +100,8 @@ func (s AccountGroupService) List(params map[string]string) (list interface{}, t
 		db = db.Where("enabled = ?", params["enabled"])
 	}
 	if params["content"] != "" {
-		db = db.Where("name LIKE ? OR description LIKE ?", "%"+params["content"]+"%", "%"+params["content"]+"%")
+		like := "%" + params["content"] + "%"
+		db = db.Where("name LIKE ? OR description LIKE ? OR remark LIKE ? OR provider_summary LIKE ? OR account_type_summary LIKE ? OR model_summary LIKE ?", like, like, like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -157,7 +168,118 @@ func (s AccountGroupService) EnsureDefaults() error {
 			return err
 		}
 	}
+	for name := range groups {
+		_ = s.RefreshSummary(name)
+	}
 	return nil
+}
+
+func (s AccountGroupService) RefreshSummary(groupName string) error {
+	groupName = normalizeAccountGroupName(groupName)
+	var entity domains.AccountGroup
+	err := global.NAV_DB.Where("name = ?", groupName).First(&entity).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		entity = domains.AccountGroup{Name: groupName, Enabled: true}
+		if err := global.NAV_DB.Create(&entity).Error; err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	var accounts []domains.Account
+	accountQuery := global.NAV_DB.Where("account_group = ?", groupName)
+	if groupName == "default" {
+		accountQuery = global.NAV_DB.Where("account_group = ? OR account_group = ?", groupName, "")
+	}
+	if err := accountQuery.Find(&accounts).Error; err != nil {
+		return err
+	}
+	var models []domains.ModelMapping
+	modelQuery := global.NAV_DB.Where("account_group = ?", groupName)
+	if groupName == "default" {
+		modelQuery = global.NAV_DB.Where("account_group = ? OR account_group = ?", groupName, "")
+	}
+	if err := modelQuery.Find(&models).Error; err != nil {
+		return err
+	}
+
+	providers := make([]string, 0)
+	accountTypes := make([]string, 0)
+	publicModels := make([]string, 0)
+	enabledAccounts := 0
+	availableAccounts := 0
+	enabledModels := 0
+	for _, account := range accounts {
+		providers = append(providers, account.Provider)
+		accountTypes = append(accountTypes, account.AccountType)
+		if account.Enabled {
+			enabledAccounts++
+		}
+		if account.Enabled && account.Status == domains.AccountStatusAvailable {
+			availableAccounts++
+		}
+	}
+	for _, model := range models {
+		providers = append(providers, model.Provider)
+		if model.PublicModel != "" {
+			publicModels = append(publicModels, model.PublicModel)
+		}
+		if model.Enabled {
+			enabledModels++
+		}
+	}
+
+	updates := map[string]any{
+		"provider_summary":        toJSONString(uniqueStrings(providers)),
+		"account_type_summary":    toJSONString(uniqueStrings(accountTypes)),
+		"model_summary":           toJSONString(uniqueStrings(publicModels)),
+		"account_count":           len(accounts),
+		"enabled_account_count":   enabledAccounts,
+		"available_account_count": availableAccounts,
+		"model_count":             len(models),
+		"enabled_model_count":     enabledModels,
+		"summary_synced_at":       time.Now().UnixMilli(),
+	}
+	return global.NAV_DB.Model(&entity).Updates(updates).Error
+}
+
+func (s AccountGroupService) RefreshSummaries(groupNames ...string) {
+	seen := map[string]bool{}
+	for _, groupName := range groupNames {
+		normalized := normalizeAccountGroupName(groupName)
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		_ = s.RefreshSummary(normalized)
+	}
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func toJSONString(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
 }
 
 func normalizeAccountGroupName(value string) string {

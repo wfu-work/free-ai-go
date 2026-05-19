@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -30,17 +31,13 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	if modelName == "" {
 		modelName = r.Header.Get("X-FreeModel-Model")
 	}
-	platformKey, err := PlatformKeyServiceApp.VerifyForModel(r.Header.Get("Authorization"), modelName)
+	platformKey, err := PlatformKeyServiceApp.Verify(r.Header.Get("Authorization"))
 	if err != nil {
 		status := http.StatusUnauthorized
 		errorType := domains.ErrorPlatformKeyInvalid
 		if err.Error() == domains.ErrorPlatformKeyLimited {
 			status = http.StatusTooManyRequests
 			errorType = domains.ErrorPlatformKeyLimited
-		}
-		if err.Error() == domains.ErrorModelNotSupported {
-			status = http.StatusForbidden
-			errorType = domains.ErrorModelNotSupported
 		}
 		RequestLogServiceApp.Record(RequestLogInput{
 			Model:      modelName,
@@ -49,6 +46,9 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			LatencyMs:  time.Since(start).Milliseconds(),
 		})
 		return ProxyOutput{StatusCode: status}, err
+	}
+	if platformKey.BoundModel != "" {
+		modelName = platformKey.BoundModel
 	}
 	if modelName == "" {
 		RequestLogServiceApp.Record(RequestLogInput{
@@ -59,6 +59,19 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		})
 		return ProxyOutput{StatusCode: http.StatusBadRequest}, errors.New("model is required")
 	}
+	if !PlatformKeyServiceApp.ModelAllowed(platformKey, modelName) {
+		if mapping, findErr := ModelServiceApp.Find(modelName); findErr != nil || !PlatformKeyServiceApp.ModelMappingAllowed(platformKey, mapping) {
+			RequestLogServiceApp.Record(RequestLogInput{
+				PlatformKeyID: platformKey.Guid,
+				Model:         modelName,
+				StatusCode:    http.StatusForbidden,
+				ErrorType:     domains.ErrorModelNotSupported,
+				LatencyMs:     time.Since(start).Milliseconds(),
+			})
+			return ProxyOutput{StatusCode: http.StatusForbidden}, errors.New(domains.ErrorModelNotSupported)
+		}
+	}
+	body = applyPlatformKeyRequestOverrides(body, platformKey, modelName)
 
 	maxAttempts := Config().MaxRetries + 1
 	if maxAttempts <= 0 {
@@ -71,7 +84,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	var lastResult *ProxyResult
 	var lastSelection RouteSelection
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		selection, err := RouterServiceApp.SelectExcluding(modelName, excluded)
+		selection, err := RouterServiceApp.SelectForKey(modelName, excluded, platformKey)
 		if err != nil {
 			lastErr = err
 			status := http.StatusServiceUnavailable
@@ -149,6 +162,35 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		OutputTokens:  outputTokens,
 	})
 	return lastOutput, lastErr
+}
+
+func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, modelName string) []byte {
+	if key.BoundModel == "" && key.ReasoningEffort == "" && key.ServiceTier == "" {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if modelName != "" {
+		payload["model"] = modelName
+	}
+	if key.ReasoningEffort != "" {
+		reasoning, _ := payload["reasoning"].(map[string]any)
+		if reasoning == nil {
+			reasoning = map[string]any{}
+		}
+		reasoning["effort"] = key.ReasoningEffort
+		payload["reasoning"] = reasoning
+	}
+	if key.ServiceTier != "" {
+		payload["service_tier"] = key.ServiceTier
+	}
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, selection RouteSelection) (*ProxyResult, ProxyOutput, error) {

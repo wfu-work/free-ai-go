@@ -15,8 +15,9 @@ const (
 	QuotaStatusExhausted = "exhausted"
 	QuotaStatusUnknown   = "unknown"
 
-	AuthTypeAPIKey      = "api_key"
-	AuthTypeBearerToken = "bearer_token"
+	AuthTypeAPIKey        = "api_key"
+	AuthTypeBearerToken   = "bearer_token"
+	AuthTypeLoginCallback = "login_callback"
 
 	ErrorAuthFailed         = "auth_failed"
 	ErrorRateLimited        = "rate_limited"

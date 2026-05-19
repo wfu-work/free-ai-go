@@ -4,6 +4,7 @@ import (
 	"freeai/domains"
 	"freeai/services"
 	fmgutils "freeai/utils"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wfu-work/nav-common-go-lib/global"
@@ -33,6 +34,7 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	response.Ok(gin.H{
 		"ok":                true,
 		"name":              "FreeAiGo",
+		"proxyPrefix":       services.Config().ProxyPrefix,
 		"accounts":          accounts,
 		"availableAccounts": availableAccounts,
 		"enabledModels":     models,
@@ -108,6 +110,7 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(accounts))
 	for _, account := range accounts {
+		accountQuotas := quotaByAccount[account.Guid]
 		items = append(items, gin.H{
 			"guid":                  account.Guid,
 			"name":                  account.Name,
@@ -122,10 +125,46 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 			"cooldownUntil":         account.CooldownUntil,
 			"lastUsedAt":            account.LastUsedAt,
 			"subscriptionExpiredAt": account.SubscriptionExpiredAt,
-			"quotas":                quotaByAccount[account.Guid],
+			"nextUsageCheckAt":      nextUsageCheckAt(account, accountQuotas),
+			"quotas":                accountQuotas,
 		})
 	}
 	response.Ok(items, c)
+}
+
+func nextUsageCheckAt(account domains.Account, quotas []domains.AccountQuota) int64 {
+	if !supportsAccountUsageQuery(account) {
+		return 0
+	}
+	if len(quotas) == 0 {
+		return 0
+	}
+	var next int64
+	for _, quota := range quotas {
+		if quota.NextRefreshAt <= 0 {
+			return 0
+		}
+		if next == 0 || quota.NextRefreshAt < next {
+			next = quota.NextRefreshAt
+		}
+	}
+	return next
+}
+
+func supportsAccountUsageQuery(account domains.Account) bool {
+	if strings.TrimSpace(account.UsageQueryType) == "codexzh" || strings.EqualFold(account.Provider, "codexzh") {
+		return true
+	}
+	if strings.TrimSpace(account.UsageQueryType) != "" {
+		return false
+	}
+	values := []string{account.SupplierName, account.OfficialURL, account.APIBaseURL, account.UsageAPIURL}
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), "codexzh") {
+			return true
+		}
+	}
+	return false
 }
 
 // MasterKey 获取主密钥状态

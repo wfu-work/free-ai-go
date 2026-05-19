@@ -66,6 +66,49 @@ type FetchAccountModelsInput struct {
 	Secret     string `json:"secret"`
 }
 
+const (
+	openAIOAuthClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
+	openAIOAuthRedirectURI  = "http://localhost:1455/auth/callback"
+	openAIOAuthTokenURL     = "https://auth.openai.com/oauth/token"
+	openAIOAuthDefaultScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+	codexZHAPIBaseURL       = "https://api.codexzh.com/v1"
+)
+
+type LoginCallbackParseInput struct {
+	Provider     string `json:"provider"`
+	CallbackURL  string `json:"callbackUrl"`
+	CodeVerifier string `json:"codeVerifier"`
+	RedirectURI  string `json:"redirectUri"`
+}
+
+type LoginCallbackParseResult struct {
+	Provider       string            `json:"provider"`
+	AuthType       string            `json:"authType"`
+	Secret         string            `json:"secret"`
+	SecretHint     string            `json:"secretHint"`
+	AccessToken    string            `json:"accessToken,omitempty"`
+	Code           string            `json:"code,omitempty"`
+	State          string            `json:"state,omitempty"`
+	CodeVerifier   string            `json:"codeVerifier,omitempty"`
+	RefreshToken   string            `json:"refreshToken,omitempty"`
+	IDToken        string            `json:"idToken,omitempty"`
+	TokenType      string            `json:"tokenType,omitempty"`
+	ExpiresIn      string            `json:"expiresIn,omitempty"`
+	Scope          string            `json:"scope,omitempty"`
+	ExchangeError  string            `json:"exchangeError,omitempty"`
+	HasAccessToken bool              `json:"hasAccessToken"`
+	Params         map[string]string `json:"params"`
+}
+
+type openAIOAuthTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    any    `json:"expires_in"`
+	Scope        string `json:"scope"`
+}
+
 type CodexZHUsageStats struct {
 	DailyQuota        float64 `json:"dailyQuota"`
 	WeeklyQuota       float64 `json:"weeklyQuota"`
@@ -87,6 +130,12 @@ type RefreshUsageResult struct {
 	Raw         CodexZHUsageStats      `json:"raw"`
 }
 
+type UsageRefreshSweepResult struct {
+	Checked int `json:"checked"`
+	Updated int `json:"updated"`
+	Failed  int `json:"failed"`
+}
+
 func (s AccountService) Create(input CreateAccountInput) (domains.Account, error) {
 	if input.Name == "" {
 		return domains.Account{}, errors.New("name is required")
@@ -97,6 +146,7 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 	if input.Secret == "" {
 		return domains.Account{}, errors.New("secret is required")
 	}
+	normalizeAccountProviderConfig(&input)
 	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
 		return domains.Account{}, err
 	}
@@ -107,6 +157,7 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 	if input.Weight <= 0 {
 		input.Weight = 1
 	}
+	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
 	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
 	encrypted, err := fmgutils.EncryptSecret(input.Secret)
 	if err != nil {
@@ -135,6 +186,9 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 		Remark:                input.Remark,
 	}
 	err = global.NAV_DB.Create(&account).Error
+	if err == nil {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
 	AuditServiceApp.Record("", "account.create", "account", account.Guid, map[string]string{"name": account.Name})
 	return account, err
 }
@@ -144,10 +198,12 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
 		return domains.Account{}, err
 	}
+	normalizeAccountProviderConfig(&input)
 	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
 		return domains.Account{}, err
 	}
 	normalizeAccountUsageConfig(&input)
+	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
 	updates := map[string]any{
 		"name":                    input.Name,
 		"email":                   input.Email,
@@ -181,6 +237,7 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 	if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
 		return domains.Account{}, err
 	}
+	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup, input.AccountGroup)
 	AuditServiceApp.Record("", "account.update", "account", guid, nil)
 	return s.Get(guid)
 }
@@ -230,7 +287,12 @@ func (s AccountService) ListAll() ([]domains.Account, error) {
 }
 
 func (s AccountService) DeleteByGuid(guid string) error {
+	var account domains.Account
+	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
 	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.Account{}).Error
+	if err == nil && account.Guid != "" {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
 	AuditServiceApp.Record("", "account.delete", "account", guid, nil)
 	return err
 }
@@ -255,6 +317,7 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 	if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
 		return domains.Account{}, err
 	}
+	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
 	AuditServiceApp.Record("", "account.refresh", "account", guid, nil)
 	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
 	return s.GetByGuid(guid)
@@ -313,6 +376,7 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 	if err != nil {
 		return nil, err
 	}
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	proxyResult, err := ProxyAPIClientApp.Do(ctx, ProxyProviderConfig{
@@ -325,16 +389,31 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 		Body:     body,
 	})
 	if err != nil {
-		return nil, err
+		errorType := classifyError(err)
+		result["upstreamStatusCode"] = 0
+		result["upstreamErrorType"] = errorType
+		result["latencyMs"] = time.Since(startedAt).Milliseconds()
+		result["ok"] = false
+		QuotaServiceApp.ApplyQuotaError(account.Guid, errorType)
+		if updated, markErr := s.MarkTestFailure(account.Guid, errorType); markErr == nil {
+			result["status"] = updated.Status
+		}
+		return result, nil
 	}
 	result["upstreamStatusCode"] = proxyResult.StatusCode
 	result["upstreamErrorType"] = proxyResult.ErrorType
 	result["latencyMs"] = proxyResult.LatencyMs
 	result["ok"] = proxyResult.StatusCode >= 200 && proxyResult.StatusCode < 300 && proxyResult.ErrorType == ""
 	if proxyResult.ErrorType != "" {
-		QuotaServiceApp.ApplyError(account.Guid, proxyResult.ErrorType)
+		QuotaServiceApp.ApplyQuotaError(account.Guid, proxyResult.ErrorType)
+		if updated, markErr := s.MarkTestFailure(account.Guid, proxyResult.ErrorType); markErr == nil {
+			result["status"] = updated.Status
+		}
 	} else {
 		_ = s.MarkUsed(account.Guid)
+		if updated, getErr := s.GetByGuid(account.Guid); getErr == nil {
+			result["status"] = updated.Status
+		}
 	}
 	return result, nil
 }
@@ -353,7 +432,7 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 		if strings.TrimSpace(input.Provider) == "custom" {
 			return nil, errors.New("apiBaseUrl is required for custom provider")
 		}
-		baseURL = Config().DefaultUpstreamBaseURL
+		baseURL = providerDefaultAPIBaseURL(input.Provider)
 	}
 	target := strings.TrimRight(baseURL, "/") + normalizeEndpoint("/v1/models", baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
@@ -387,6 +466,139 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 	return models, nil
 }
 
+func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (LoginCallbackParseResult, error) {
+	rawURL := strings.TrimSpace(input.CallbackURL)
+	if rawURL == "" {
+		return LoginCallbackParseResult{}, errors.New("callbackUrl is required")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return LoginCallbackParseResult{}, err
+	}
+	params := map[string]string{}
+	collectValues(params, parsed.Query())
+	if parsed.Fragment != "" {
+		fragmentValues, _ := url.ParseQuery(parsed.Fragment)
+		collectValues(params, fragmentValues)
+	}
+	accessToken := firstNonEmpty(params["access_token"], params["token"], params["id_token"])
+	code := params["code"]
+	state := params["state"]
+	if accessToken == "" && code == "" && state == "" {
+		return LoginCallbackParseResult{}, errors.New("callback url does not contain access_token, code or state")
+	}
+	tokenType := params["token_type"]
+	expiresIn := params["expires_in"]
+	scope := firstNonEmpty(params["scope"], openAIOAuthDefaultScope)
+	codeVerifier := strings.TrimSpace(input.CodeVerifier)
+	refreshToken := ""
+	idToken := ""
+	exchangeError := ""
+	if accessToken == "" && code != "" {
+		if codeVerifier == "" {
+			exchangeError = "missing code_verifier"
+		} else {
+			tokenResp, err := exchangeOpenAIOAuthCode(code, codeVerifier, strings.TrimSpace(input.RedirectURI))
+			if err != nil {
+				exchangeError = err.Error()
+			} else {
+				accessToken = strings.TrimSpace(tokenResp.AccessToken)
+				refreshToken = strings.TrimSpace(tokenResp.RefreshToken)
+				idToken = strings.TrimSpace(tokenResp.IDToken)
+				tokenType = firstNonEmpty(tokenResp.TokenType, tokenType)
+				expiresIn = firstNonEmpty(tokenExpiresInString(tokenResp.ExpiresIn), expiresIn)
+				scope = firstNonEmpty(tokenResp.Scope, scope)
+			}
+		}
+	}
+	secretPayload := map[string]string{
+		"provider":      strings.TrimSpace(input.Provider),
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"id_token":      idToken,
+		"code":          code,
+		"state":         state,
+		"code_verifier": codeVerifier,
+		"token_type":    tokenType,
+		"expires_in":    expiresIn,
+		"scope":         scope,
+		"callback_url":  rawURL,
+	}
+	secretRaw, err := json.Marshal(secretPayload)
+	if err != nil {
+		return LoginCallbackParseResult{}, err
+	}
+	secret := string(secretRaw)
+	hintSource := firstNonEmpty(accessToken, code, state, rawURL)
+	return LoginCallbackParseResult{
+		Provider:       strings.TrimSpace(input.Provider),
+		AuthType:       domains.AuthTypeLoginCallback,
+		Secret:         secret,
+		SecretHint:     fmgutils.SecretHint(hintSource),
+		AccessToken:    accessToken,
+		Code:           code,
+		State:          state,
+		CodeVerifier:   codeVerifier,
+		RefreshToken:   refreshToken,
+		IDToken:        idToken,
+		TokenType:      tokenType,
+		ExpiresIn:      expiresIn,
+		Scope:          scope,
+		ExchangeError:  exchangeError,
+		HasAccessToken: accessToken != "",
+		Params:         params,
+	}, nil
+}
+
+func exchangeOpenAIOAuthCode(code, codeVerifier, redirectURI string) (openAIOAuthTokenResponse, error) {
+	redirectURI = strings.TrimSpace(redirectURI)
+	if redirectURI == "" {
+		redirectURI = openAIOAuthRedirectURI
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("client_id", openAIOAuthClientID)
+	form.Set("code", strings.TrimSpace(code))
+	form.Set("redirect_uri", redirectURI)
+	form.Set("code_verifier", strings.TrimSpace(codeVerifier))
+
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIOAuthTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return openAIOAuthTokenResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return openAIOAuthTokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openAIOAuthTokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return openAIOAuthTokenResponse{}, fmt.Errorf("oauth token exchange failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tokenResp openAIOAuthTokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return openAIOAuthTokenResponse{}, err
+	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return openAIOAuthTokenResponse{}, errors.New("oauth token exchange returned empty access_token")
+	}
+	return tokenResp, nil
+}
+
+func tokenExpiresInString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
 func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	account, err := s.Get(guid)
 	if err != nil {
@@ -407,6 +619,65 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	default:
 		return RefreshUsageResult{}, fmt.Errorf("unsupported usage query type %s", usageType)
 	}
+}
+
+func (s AccountService) RefreshDueUsageAccounts() (UsageRefreshSweepResult, error) {
+	now := time.Now().UnixMilli()
+	var accounts []domains.Account
+	if err := global.NAV_DB.Where("enabled = ?", true).Find(&accounts).Error; err != nil {
+		return UsageRefreshSweepResult{}, err
+	}
+	result := UsageRefreshSweepResult{}
+	failures := make([]string, 0)
+	for _, account := range accounts {
+		if !supportsUsageQuery(account) {
+			continue
+		}
+		due, err := s.usageRefreshDue(account.Guid, now)
+		if err != nil {
+			result.Failed++
+			failures = append(failures, fmt.Sprintf("%s: %v", account.Guid, err))
+			continue
+		}
+		if !due {
+			continue
+		}
+		result.Checked++
+		if _, err := s.RefreshUsage(account.Guid); err != nil {
+			result.Failed++
+			failures = append(failures, fmt.Sprintf("%s: %v", account.Guid, err))
+			continue
+		}
+		result.Updated++
+	}
+	if len(failures) > 0 {
+		return result, fmt.Errorf("refresh usage failed for %d account(s): %s", len(failures), strings.Join(failures, "; "))
+	}
+	return result, nil
+}
+
+func (s AccountService) usageRefreshDue(accountGuid string, now int64) (bool, error) {
+	var quotas []domains.AccountQuota
+	if err := global.NAV_DB.Where("account_guid = ?", accountGuid).Find(&quotas).Error; err != nil {
+		return false, err
+	}
+	if len(quotas) == 0 {
+		return true, nil
+	}
+	for _, quota := range quotas {
+		if quota.NextRefreshAt == 0 || quota.NextRefreshAt <= now {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func supportsUsageQuery(account domains.Account) bool {
+	usageType := strings.TrimSpace(account.UsageQueryType)
+	if usageType == "codexzh" || strings.EqualFold(account.Provider, "codexzh") {
+		return true
+	}
+	return usageType == "" && looksLikeCodexZHAccount(account)
 }
 
 func looksLikeCodexZHAccount(account domains.Account) bool {
@@ -542,6 +813,8 @@ func (s AccountService) Reorder(input ReorderAccountInput) error {
 }
 
 func (s AccountService) SetEnabled(guid string, enabled bool) error {
+	var account domains.Account
+	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
 	status := domains.AccountStatusDisabled
 	if enabled {
 		status = domains.AccountStatusAvailable
@@ -550,16 +823,25 @@ func (s AccountService) SetEnabled(guid string, enabled bool) error {
 		"enabled": enabled,
 		"status":  status,
 	}).Error
+	if err == nil && account.Guid != "" {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
 	AuditServiceApp.Record("", "account.enabled", "account", guid, map[string]bool{"enabled": enabled})
 	return err
 }
 
 func (s AccountService) MarkUsed(guid string) error {
-	return global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
+	var account domains.Account
+	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
+	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
 		"last_used_at":  time.Now().UnixMilli(),
 		"failure_count": 0,
 		"status":        domains.AccountStatusAvailable,
 	}).Error
+	if err == nil && account.Guid != "" {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
+	return err
 }
 
 func (s AccountService) MarkFailure(guid, errorType string) error {
@@ -583,11 +865,47 @@ func (s AccountService) MarkFailure(guid, errorType string) error {
 			cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
 		}
 	}
-	return global.NAV_DB.Model(&account).Updates(map[string]any{
+	err := global.NAV_DB.Model(&account).Updates(map[string]any{
 		"failure_count":  account.FailureCount + 1,
 		"status":         status,
 		"cooldown_until": cooldownUntil,
 	}).Error
+	if err == nil {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
+	return err
+}
+
+func (s AccountService) MarkTestFailure(guid, errorType string) (domains.Account, error) {
+	var account domains.Account
+	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
+		return domains.Account{}, err
+	}
+	status := account.Status
+	cooldownUntil := account.CooldownUntil
+	switch errorType {
+	case domains.ErrorAuthFailed:
+		status = domains.AccountStatusInvalid
+	case domains.ErrorRateLimited:
+		status = domains.AccountStatusLimited
+		cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
+	case domains.ErrorQuotaExhausted:
+		status = domains.AccountStatusExhausted
+	case domains.ErrorUpstream5xx, domains.ErrorNetwork, domains.ErrorUpstreamTimeout:
+		status = domains.AccountStatusCooldown
+		cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
+	default:
+		status = domains.AccountStatusUnknown
+	}
+	if err := global.NAV_DB.Model(&account).Updates(map[string]any{
+		"failure_count":  account.FailureCount + 1,
+		"status":         status,
+		"cooldown_until": cooldownUntil,
+	}).Error; err != nil {
+		return domains.Account{}, err
+	}
+	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	return s.GetByGuid(guid)
 }
 
 func (s AccountService) MarkExpiredSubscriptions() error {
@@ -661,6 +979,23 @@ func validateCustomProvider(provider, apiBaseURL, supplierName, officialURL stri
 	return nil
 }
 
+func normalizeAccountProviderConfig(input *CreateAccountInput) {
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.APIBaseURL = strings.TrimSpace(input.APIBaseURL)
+	if input.Provider != "custom" && input.APIBaseURL == "" {
+		input.APIBaseURL = providerDefaultAPIBaseURL(input.Provider)
+	}
+}
+
+func providerDefaultAPIBaseURL(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codexzh":
+		return codexZHAPIBaseURL
+	default:
+		return Config().DefaultUpstreamBaseURL
+	}
+}
+
 func normalizeAccountUsageConfig(input *CreateAccountInput) {
 	input.UsageQueryType = strings.TrimSpace(input.UsageQueryType)
 	input.UsageAPIURL = strings.TrimSpace(input.UsageAPIURL)
@@ -676,7 +1011,7 @@ func accountBaseURL(account domains.Account) string {
 	if baseURL := strings.TrimSpace(account.APIBaseURL); baseURL != "" {
 		return baseURL
 	}
-	return Config().DefaultUpstreamBaseURL
+	return providerDefaultAPIBaseURL(account.Provider)
 }
 
 func parseModelListResponse(body []byte) []string {
@@ -721,6 +1056,24 @@ func appendQueryParam(rawURL, key, value string) string {
 	query.Set(key, value)
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
+}
+
+func collectValues(out map[string]string, values url.Values) {
+	for key, item := range values {
+		if len(item) > 0 && strings.TrimSpace(item[0]) != "" {
+			out[key] = strings.TrimSpace(item[0])
+		}
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseCodexZHUsageResponse(body []byte) (CodexZHUsageStats, error) {

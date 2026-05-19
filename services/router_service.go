@@ -28,11 +28,19 @@ func (s RouterService) Select(modelName string) (RouteSelection, error) {
 }
 
 func (s RouterService) SelectExcluding(modelName string, excluded map[string]bool) (RouteSelection, error) {
+	return s.SelectForKey(modelName, excluded, domains.PlatformKey{})
+}
+
+func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, key domains.PlatformKey) (RouteSelection, error) {
 	model, err := ModelServiceApp.Find(modelName)
 	if err != nil {
 		return RouteSelection{}, err
 	}
-	accounts, err := AccountServiceApp.FindAvailable(model.Provider, model.AccountGroup, model.UpstreamModel, 100)
+	accountGroup := model.AccountGroup
+	if key.AccountGroupFilter != "" {
+		accountGroup = key.AccountGroupFilter
+	}
+	accounts, err := AccountServiceApp.FindAvailable(model.Provider, accountGroup, model.UpstreamModel, 100)
 	if err != nil {
 		return RouteSelection{}, err
 	}
@@ -56,7 +64,7 @@ func (s RouterService) SelectExcluding(modelName string, excluded map[string]boo
 	if len(candidates) == 0 {
 		return RouteSelection{}, errors.New(domains.ErrorNoAvailableAccount)
 	}
-	account := s.pick(model, candidates)
+	account := s.pickForKey(model, candidates, key)
 	return RouteSelection{Model: model, Account: account}, nil
 }
 
@@ -85,6 +93,21 @@ func supportsModel(raw, model string) bool {
 
 func (s RouterService) pick(model domains.ModelMapping, accounts []domains.Account) domains.Account {
 	strategy := Config().RoutingStrategy
+	return s.pickByStrategy(model, accounts, strategy)
+}
+
+func (s RouterService) pickForKey(model domains.ModelMapping, accounts []domains.Account, key domains.PlatformKey) domains.Account {
+	strategy := Config().RoutingStrategy
+	switch key.RoutingStrategy {
+	case "account_round_robin", "mixed_round_robin":
+		strategy = "weighted_round_robin"
+	case "api_round_robin":
+		strategy = "round_robin"
+	}
+	return s.pickByStrategy(model, accounts, strategy)
+}
+
+func (s RouterService) pickByStrategy(model domains.ModelMapping, accounts []domains.Account, strategy string) domains.Account {
 	switch strategy {
 	case "round_robin":
 		return s.pickRoundRobin(model, accounts, false)

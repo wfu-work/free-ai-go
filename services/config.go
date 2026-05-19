@@ -19,6 +19,8 @@ type FreeModelConfig struct {
 	CleanupLogRetentionDays  int
 	SecretKeyFile            string
 	LogPromptContent         bool
+	OpenAICallbackEnabled    bool
+	OpenAICallbackAddr       string
 }
 
 func Config() FreeModelConfig {
@@ -34,6 +36,10 @@ func Config() FreeModelConfig {
 			m = cast.ToStringMap(global.NAV_CONFIG.Extras["freemodel"])
 		}
 	}
+	openAICallbackEnabled := true
+	if _, ok := m["openai-callback-enabled"]; ok {
+		openAICallbackEnabled = cast.ToBool(m["openai-callback-enabled"])
+	}
 	return FreeModelConfig{
 		ProxyPrefix:              stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
 		DefaultUpstreamBaseURL:   stringDefault(cast.ToString(m["default-upstream-base-url"]), "https://api.openai.com/v1"),
@@ -41,11 +47,13 @@ func Config() FreeModelConfig {
 		StreamIdleTimeoutSeconds: int64Default(cast.ToInt64(m["stream-idle-timeout-seconds"]), 60),
 		MaxRetries:               intDefault(cast.ToInt(m["max-retries"]), 1),
 		RoutingStrategy:          stringDefault(cast.ToString(m["routing-strategy"]), "weighted_round_robin"),
-		QuotaRefreshSeconds:      int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 300),
+		QuotaRefreshSeconds:      int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 180),
 		CooldownSeconds:          int64Default(cast.ToInt64(m["cooldown-seconds"]), 300),
 		CleanupLogRetentionDays:  intDefault(cast.ToInt(m["cleanup-log-retention-days"]), 30),
 		SecretKeyFile:            stringDefault(cast.ToString(m["secret-key-file"]), "./data/master.key"),
 		LogPromptContent:         cast.ToBool(m["log-prompt-content"]),
+		OpenAICallbackEnabled:    openAICallbackEnabled,
+		OpenAICallbackAddr:       stringDefault(cast.ToString(m["openai-callback-addr"]), ":1455"),
 	}
 }
 

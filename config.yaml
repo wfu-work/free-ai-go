@@ -27,7 +27,7 @@ freeai:
   stream-idle-timeout-seconds: 60
   max-retries: 1
   routing-strategy: weighted_round_robin
-  quota-refresh-seconds: 300
+  quota-refresh-seconds: 180
   cooldown-seconds: 300
   cleanup-log-retention-days: 30
   secret-key-file: ./data/master.key

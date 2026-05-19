@@ -1,11 +1,24 @@
 package routers
 
-import "github.com/gin-gonic/gin"
+import (
+	"freeai/services"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
 
 type ProxyRouter struct{}
 
 func (r ProxyRouter) InitProxyRouter(engine *gin.Engine) {
-	v1 := engine.Group("/v1")
+	proxyPrefix := strings.TrimSpace(services.Config().ProxyPrefix)
+	if proxyPrefix == "" {
+		proxyPrefix = "/v1"
+	}
+	if !strings.HasPrefix(proxyPrefix, "/") {
+		proxyPrefix = "/" + proxyPrefix
+	}
+	proxyPrefix = strings.TrimRight(proxyPrefix, "/")
+	v1 := engine.Group(proxyPrefix)
 	{
 		v1.GET("models", proxyApi.Models)
 		v1.POST("chat/completions", proxyApi.ChatCompletions)

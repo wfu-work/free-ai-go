@@ -6,6 +6,7 @@ import (
 	"freeai/domains"
 	"freeai/routers"
 	fmgscheduleds "freeai/scheduleds"
+	"freeai/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
@@ -30,6 +31,7 @@ func Init() {
 		routers.RouterGroupApp.InitFreeModelRouters(publicGroup, privateGroup)
 	})
 	sysInit.OnOtherInit(func() {
+		services.StartOpenAIOAuthCallbackServer()
 		fmgscheduleds.Bootstrap()
 	})
 	sysInit.OnScheInit(func(timers commonscheduleds.Timer, options []cron.Option) {

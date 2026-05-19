@@ -123,6 +123,13 @@ func (s QuotaService) ApplyError(accountGuid, errorType string) {
 		return
 	}
 	_ = AccountServiceApp.MarkFailure(accountGuid, errorType)
+	s.ApplyQuotaError(accountGuid, errorType)
+}
+
+func (s QuotaService) ApplyQuotaError(accountGuid, errorType string) {
+	if accountGuid == "" || errorType == "" {
+		return
+	}
 	quotaStatus := ""
 	switch errorType {
 	case domains.ErrorRateLimited:
@@ -236,7 +243,7 @@ func normalizeQuotaInput(input QuotaInput) QuotaInput {
 	if input.NextRefreshAt == 0 {
 		refreshEvery := Config().QuotaRefreshSeconds
 		if refreshEvery <= 0 {
-			refreshEvery = 300
+			refreshEvery = 180
 		}
 		input.NextRefreshAt = time.Now().Add(time.Duration(refreshEvery) * time.Second).UnixMilli()
 	}

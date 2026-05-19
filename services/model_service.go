@@ -30,6 +30,7 @@ func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
 	if input.PublicModel == "" || input.UpstreamModel == "" || input.Provider == "" {
 		return domains.ModelMapping{}, errors.New("publicModel, upstreamModel and provider are required")
 	}
+	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
 	if input.TimeoutSec <= 0 {
 		input.TimeoutSec = int(Config().RequestTimeoutSeconds)
 	}
@@ -44,6 +45,9 @@ func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
 		Enabled:       true,
 	}
 	err := global.NAV_DB.Create(&entity).Error
+	if err == nil {
+		AccountGroupServiceApp.RefreshSummaries(entity.AccountGroup)
+	}
 	AuditServiceApp.Record("", "model.create", "model", entity.Guid, map[string]string{"model": entity.PublicModel})
 	return entity, err
 }
@@ -56,6 +60,7 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	if input.PublicModel == "" || input.UpstreamModel == "" || input.Provider == "" {
 		return domains.ModelMapping{}, errors.New("publicModel, upstreamModel and provider are required")
 	}
+	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
 	if input.TimeoutSec <= 0 {
 		input.TimeoutSec = int(Config().RequestTimeoutSeconds)
 	}
@@ -70,6 +75,7 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	}).Error; err != nil {
 		return domains.ModelMapping{}, err
 	}
+	AccountGroupServiceApp.RefreshSummaries(model.AccountGroup, input.AccountGroup)
 	AuditServiceApp.Record("", "model.update", "model", guid, map[string]string{"model": input.PublicModel})
 	return s.Get(guid)
 }
@@ -140,7 +146,13 @@ func (s ModelService) Find(publicModel string) (domains.ModelMapping, error) {
 }
 
 func (s ModelService) SetEnabled(guid string, enabled bool) error {
-	return global.NAV_DB.Model(&domains.ModelMapping{}).Where("guid = ?", guid).Update("enabled", enabled).Error
+	var model domains.ModelMapping
+	_ = global.NAV_DB.Where("guid = ?", guid).First(&model).Error
+	err := global.NAV_DB.Model(&domains.ModelMapping{}).Where("guid = ?", guid).Update("enabled", enabled).Error
+	if err == nil && model.Guid != "" {
+		AccountGroupServiceApp.RefreshSummaries(model.AccountGroup)
+	}
+	return err
 }
 
 func (s ModelService) PublicNames(model domains.ModelMapping) []string {
@@ -193,7 +205,12 @@ func (s ModelService) Delete(guid string) error {
 }
 
 func (s ModelService) DeleteByGuid(guid string) error {
+	var model domains.ModelMapping
+	_ = global.NAV_DB.Where("guid = ?", guid).First(&model).Error
 	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.ModelMapping{}).Error
+	if err == nil && model.Guid != "" {
+		AccountGroupServiceApp.RefreshSummaries(model.AccountGroup)
+	}
 	AuditServiceApp.Record("", "model.delete", "model", guid, nil)
 	return err
 }

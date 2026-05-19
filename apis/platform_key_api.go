@@ -93,6 +93,17 @@ func (a PlatformKeyApi) ListAll(c *gin.Context) {
 	response.Ok(list, c)
 }
 
+// Stats 获取平台密钥统计
+// @Router /platform-keys/stats [get]
+func (a PlatformKeyApi) Stats(c *gin.Context) {
+	stats, err := platformKeyService.Stats()
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(stats, c)
+}
+
 // GetByGuid 获取密钥信息
 // @Summary 根据guid获取密钥
 // @Description 根据guid获取密钥
