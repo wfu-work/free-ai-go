@@ -1,10 +1,13 @@
 package apis
 
 import (
+	"encoding/json"
+	"fmt"
 	"freeai/domains"
 	"freeai/services"
 	fmgutils "freeai/utils"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wfu-work/nav-common-go-lib/global"
@@ -214,4 +217,53 @@ func supportsAccountUsageQuery(account domains.Account) bool {
 // @Router /ops/master-key [get]
 func (a OpsApi) MasterKey(c *gin.Context) {
 	response.Ok(fmgutils.CheckMasterKey(services.Config().SecretKeyFile), c)
+}
+
+// ExportCoreBackup 导出核心数据备份
+// @Summary 导出核心数据备份
+// @Description 导出核心数据备份
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} services.CoreBackupPayload
+// @Router /ops/core-backup [get]
+func (a OpsApi) ExportCoreBackup(c *gin.Context) {
+	payload, err := services.BackupServiceApp.ExportCore()
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	body, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	filename := fmt.Sprintf("freeai-core-backup-%s.json", time.Now().Format("20060102-150405"))
+	c.Header("Content-Type", "application/json; charset=utf-8")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Data(200, "application/json; charset=utf-8", body)
+}
+
+// ImportCoreBackup 导入核心数据备份
+// @Summary 导入核心数据备份
+// @Description 导入核心数据备份
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=services.CoreBackupImportResult,msg=string}
+// @Router /ops/core-backup [post]
+func (a OpsApi) ImportCoreBackup(c *gin.Context) {
+	var payload services.CoreBackupPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := services.BackupServiceApp.ImportCore(payload)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
 }

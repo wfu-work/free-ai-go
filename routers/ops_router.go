@@ -12,4 +12,6 @@ func (r OpsRouter) InitOpsRouter(group *gin.RouterGroup) {
 	group.GET("ops/routes", opsApi.Routes)
 	group.GET("ops/account-health", opsApi.AccountHealth)
 	group.GET("ops/master-key", opsApi.MasterKey)
+	group.GET("ops/core-backup", opsApi.ExportCoreBackup)
+	group.POST("ops/core-backup", opsApi.ImportCoreBackup)
 }
