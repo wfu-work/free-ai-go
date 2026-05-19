@@ -35,6 +35,9 @@ func Init() {
 	sysInit.OnScheInit(func(timers commonscheduleds.Timer, options []cron.Option) {
 		fmgscheduleds.Register(timers, options)
 	})
+	sysInit.OnClearInit(func() []commonscheduleds.ClearDB {
+		return []commonscheduleds.ClearDB{}
+	})
 	sysInit.Init()
 }
 

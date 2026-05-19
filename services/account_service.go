@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +30,8 @@ type CreateAccountInput struct {
 	APIBaseURL            string `json:"apiBaseUrl"`
 	SupplierName          string `json:"supplierName"`
 	OfficialURL           string `json:"officialUrl"`
+	UsageQueryType        string `json:"usageQueryType"`
+	UsageAPIURL           string `json:"usageApiUrl"`
 	AccountType           string `json:"accountType"`
 	AuthType              string `json:"authType"`
 	Secret                string `json:"secret"`
@@ -62,6 +65,27 @@ type FetchAccountModelsInput struct {
 	Secret     string `json:"secret"`
 }
 
+type CodexZHUsageStats struct {
+	DailyQuota        float64 `json:"dailyQuota"`
+	WeeklyQuota       float64 `json:"weeklyQuota"`
+	TodayUsed         float64 `json:"todayUsed"`
+	WeekUsed          float64 `json:"weekUsed"`
+	TodayCalls        int64   `json:"todayCalls"`
+	TotalCalls        int64   `json:"totalCalls"`
+	RPM               int64   `json:"rpm"`
+	TPM               int64   `json:"tpm"`
+	SubscriptionStart string  `json:"subscriptionStart"`
+	SubscriptionEnd   string  `json:"subscriptionEnd"`
+}
+
+type RefreshUsageResult struct {
+	AccountGuid string                 `json:"accountGuid"`
+	Provider    string                 `json:"provider"`
+	UsageType   string                 `json:"usageType"`
+	Quotas      []domains.AccountQuota `json:"quotas"`
+	Raw         CodexZHUsageStats      `json:"raw"`
+}
+
 func (s AccountService) Create(input CreateAccountInput) (domains.Account, error) {
 	if input.Name == "" {
 		return domains.Account{}, errors.New("name is required")
@@ -78,6 +102,7 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 	if input.AuthType == "" {
 		input.AuthType = domains.AuthTypeBearerToken
 	}
+	normalizeAccountUsageConfig(&input)
 	if input.Weight <= 0 {
 		input.Weight = 1
 	}
@@ -93,6 +118,8 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 		APIBaseURL:            strings.TrimSpace(input.APIBaseURL),
 		SupplierName:          strings.TrimSpace(input.SupplierName),
 		OfficialURL:           strings.TrimSpace(input.OfficialURL),
+		UsageQueryType:        strings.TrimSpace(input.UsageQueryType),
+		UsageAPIURL:           strings.TrimSpace(input.UsageAPIURL),
 		AccountType:           input.AccountType,
 		AuthType:              input.AuthType,
 		EncryptedSecret:       encrypted,
@@ -119,6 +146,7 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
 		return domains.Account{}, err
 	}
+	normalizeAccountUsageConfig(&input)
 	updates := map[string]any{
 		"name":                    input.Name,
 		"email":                   input.Email,
@@ -126,6 +154,8 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 		"api_base_url":            strings.TrimSpace(input.APIBaseURL),
 		"supplier_name":           strings.TrimSpace(input.SupplierName),
 		"official_url":            strings.TrimSpace(input.OfficialURL),
+		"usage_query_type":        strings.TrimSpace(input.UsageQueryType),
+		"usage_api_url":           strings.TrimSpace(input.UsageAPIURL),
 		"account_type":            input.AccountType,
 		"auth_type":               input.AuthType,
 		"supported_models":        input.SupportedModels,
@@ -323,6 +353,141 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 	return models, nil
 }
 
+func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
+	account, err := s.Get(guid)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	usageType := strings.TrimSpace(account.UsageQueryType)
+	if usageType == "" && strings.EqualFold(account.Provider, "codexzh") {
+		usageType = "codexzh"
+	}
+	if usageType == "" && looksLikeCodexZHAccount(account) {
+		usageType = "codexzh"
+	}
+	switch usageType {
+	case "codexzh":
+		return s.refreshCodexZHUsage(account)
+	case "":
+		return RefreshUsageResult{}, errors.New("usage query is not configured")
+	default:
+		return RefreshUsageResult{}, fmt.Errorf("unsupported usage query type %s", usageType)
+	}
+}
+
+func looksLikeCodexZHAccount(account domains.Account) bool {
+	values := []string{account.SupplierName, account.OfficialURL, account.APIBaseURL, account.UsageAPIURL}
+	for _, value := range values {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), "codexzh") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s AccountService) refreshCodexZHUsage(account domains.Account) (RefreshUsageResult, error) {
+	secret, err := s.DecryptSecret(account)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	stats, err := s.fetchCodexZHUsage(account, secret)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	quotas, err := s.upsertCodexZHQuotas(account, stats)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	if endMs := parseUsageTime(stats.SubscriptionEnd); endMs > 0 {
+		_ = global.NAV_DB.Model(&account).Update("subscription_expired_at", endMs).Error
+	}
+	return RefreshUsageResult{
+		AccountGuid: account.Guid,
+		Provider:    account.Provider,
+		UsageType:   "codexzh",
+		Quotas:      quotas,
+		Raw:         stats,
+	}, nil
+}
+
+func (s AccountService) fetchCodexZHUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
+	baseURL := strings.TrimSpace(account.UsageAPIURL)
+	if baseURL == "" {
+		baseURL = "https://codexzh.com/api/v1/usage/stats"
+	}
+	reqURL := appendQueryParam(baseURL, "key", secret)
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return CodexZHUsageStats{}, fmt.Errorf("fetch usage failed: upstream returned %d", resp.StatusCode)
+	}
+	stats, err := parseCodexZHUsageResponse(body)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	return stats, nil
+}
+
+func (s AccountService) upsertCodexZHQuotas(account domains.Account, stats CodexZHUsageStats) ([]domains.AccountQuota, error) {
+	now := time.Now().UnixMilli()
+	extra, _ := json.Marshal(map[string]any{
+		"todayCalls":        stats.TodayCalls,
+		"totalCalls":        stats.TotalCalls,
+		"rpm":               stats.RPM,
+		"tpm":               stats.TPM,
+		"subscriptionStart": stats.SubscriptionStart,
+		"subscriptionEnd":   stats.SubscriptionEnd,
+	})
+	dailyTotal := codexZHQuotaToUSD(stats.DailyQuota)
+	weeklyTotal := codexZHQuotaToUSD(stats.WeeklyQuota)
+	inputs := []QuotaInput{
+		{
+			AccountGuid:     account.Guid,
+			WindowType:      "daily",
+			Unit:            "usd",
+			UsedAmount:      stats.TodayUsed,
+			RemainingAmount: dailyTotal - stats.TodayUsed,
+			TotalAmount:     dailyTotal,
+			ResetAt:         defaultQuotaResetAt("daily", now),
+			LastSyncedAt:    now,
+			Extra:           string(extra),
+		},
+		{
+			AccountGuid:     account.Guid,
+			WindowType:      "weekly",
+			Unit:            "usd",
+			UsedAmount:      stats.WeekUsed,
+			RemainingAmount: weeklyTotal - stats.WeekUsed,
+			TotalAmount:     weeklyTotal,
+			ResetAt:         parseUsageTime(stats.SubscriptionEnd),
+			LastSyncedAt:    now,
+			Extra:           string(extra),
+		},
+	}
+	quotas := make([]domains.AccountQuota, 0, len(inputs))
+	for _, input := range inputs {
+		quota, err := QuotaServiceApp.Upsert(input)
+		if err != nil {
+			return nil, err
+		}
+		quotas = append(quotas, quota)
+	}
+	return quotas, nil
+}
+
 func (s AccountService) Reorder(input ReorderAccountInput) error {
 	return global.NAV_DB.Transaction(func(tx *gorm.DB) error {
 		for _, item := range input.Items {
@@ -462,6 +627,17 @@ func validateCustomProvider(provider, apiBaseURL, supplierName, officialURL stri
 	return nil
 }
 
+func normalizeAccountUsageConfig(input *CreateAccountInput) {
+	input.UsageQueryType = strings.TrimSpace(input.UsageQueryType)
+	input.UsageAPIURL = strings.TrimSpace(input.UsageAPIURL)
+	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "codexzh") {
+		input.UsageQueryType = "codexzh"
+	}
+	if input.UsageQueryType == "codexzh" && input.UsageAPIURL == "" {
+		input.UsageAPIURL = "https://codexzh.com/api/v1/usage/stats"
+	}
+}
+
 func accountBaseURL(account domains.Account) string {
 	if baseURL := strings.TrimSpace(account.APIBaseURL); baseURL != "" {
 		return baseURL
@@ -496,4 +672,60 @@ func parseModelListResponse(body []byte) []string {
 		}
 	}
 	return models
+}
+
+func appendQueryParam(rawURL, key, value string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		separator := "?"
+		if strings.Contains(rawURL, "?") {
+			separator = "&"
+		}
+		return rawURL + separator + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+	}
+	query := parsed.Query()
+	query.Set(key, value)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func parseCodexZHUsageResponse(body []byte) (CodexZHUsageStats, error) {
+	var direct CodexZHUsageStats
+	if err := json.Unmarshal(body, &direct); err == nil && (direct.DailyQuota > 0 || direct.WeeklyQuota > 0 || direct.TodayUsed > 0 || direct.WeekUsed > 0) {
+		return direct, nil
+	}
+	var wrapped struct {
+		Data CodexZHUsageStats `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	if wrapped.Data.DailyQuota == 0 && wrapped.Data.WeeklyQuota == 0 && wrapped.Data.TodayUsed == 0 && wrapped.Data.WeekUsed == 0 {
+		return CodexZHUsageStats{}, errors.New("invalid codexzh usage response")
+	}
+	return wrapped.Data, nil
+}
+
+func codexZHQuotaToUSD(value float64) float64 {
+	return value / 500000
+}
+
+func parseUsageTime(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+		"2006/01/02 15:04:05",
+		"2006/01/02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+			return t.UnixMilli()
+		}
+	}
+	return 0
 }

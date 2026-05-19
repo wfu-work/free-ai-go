@@ -17,6 +17,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		routerLogger.POST(":guid/enable", accountApi.Enable)
 		routerLogger.POST(":guid/disable", accountApi.Disable)
 		routerLogger.POST(":guid/refresh", accountApi.Refresh)
+		routerLogger.POST(":guid/refresh-usage", accountApi.RefreshUsage)
 		routerLogger.POST(":guid/test", accountApi.Test)
 		routerLogger.POST("fetch-models", accountApi.FetchModels)
 		routerLogger.POST("reorder", accountApi.Reorder)

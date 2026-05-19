@@ -10,6 +10,8 @@ type Account struct {
 	APIBaseURL            string `json:"apiBaseUrl" gorm:"size:500;comment:API请求地址"`
 	SupplierName          string `json:"supplierName" gorm:"size:120;comment:供应商名称"`
 	OfficialURL           string `json:"officialUrl" gorm:"size:500;comment:官网链接"`
+	UsageQueryType        string `json:"usageQueryType" gorm:"size:40;index;comment:额度查询类型"`
+	UsageAPIURL           string `json:"usageApiUrl" gorm:"size:500;comment:额度查询地址"`
 	AccountType           string `json:"accountType" gorm:"size:40;index;comment:账号类型"`
 	AuthType              string `json:"authType" gorm:"size:40;comment:认证类型"`
 	EncryptedSecret       string `json:"-" gorm:"comment:加密密钥"`

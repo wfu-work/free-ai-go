@@ -88,6 +88,15 @@ func (a AccountApi) Refresh(c *gin.Context) {
 	response.Ok(account, c)
 }
 
+func (a AccountApi) RefreshUsage(c *gin.Context) {
+	result, err := accountService.RefreshUsage(c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
 func (a AccountApi) Test(c *gin.Context) {
 	var input services.AccountTestInput
 	_ = c.ShouldBindJSON(&input)
