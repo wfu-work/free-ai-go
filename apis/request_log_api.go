@@ -47,7 +47,9 @@ func (a RequestLogApi) List(c *gin.Context) {
 // @Success 200 {object} response.Response{data=[]domains.RequestLog,msg=string}
 // @Router /request-logs/list/all [get]
 func (a RequestLogApi) ListAll(c *gin.Context) {
-	list, err := requestLogService.ListAll()
+	limit := cast.ToInt(c.Query("limit"))
+	since := cast.ToInt64(c.Query("since"))
+	list, err := requestLogService.ListAll(limit, since)
 	if err != nil {
 		global.NAV_LOG.Error("获取失败!", zap.Error(err))
 		response.Fail(nil, c)

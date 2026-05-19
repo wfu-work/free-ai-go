@@ -42,6 +42,42 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	}, c)
 }
 
+// GatewayConfig 获取网关配置
+// @Summary 获取网关配置
+// @Description 获取网关配置
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=object,msg=string}
+// @Router /ops/gateway-config [get]
+func (a OpsApi) GatewayConfig(c *gin.Context) {
+	response.Ok(services.GatewayProxyConfig(), c)
+}
+
+// SaveGatewayConfig 保存网关配置
+// @Summary 保存网关配置
+// @Description 保存网关配置
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=object,msg=string}
+// @Router /ops/gateway-config [put]
+func (a OpsApi) SaveGatewayConfig(c *gin.Context) {
+	var input services.GatewayProxyConfigInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	cfg, err := services.UpdateGatewayProxyConfig(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(cfg, c)
+}
+
 // Stats 获取请求统计
 // @Summary 获取请求统计
 // @Description 获取请求统计

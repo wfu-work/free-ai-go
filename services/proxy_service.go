@@ -24,12 +24,16 @@ type ProxyOutput struct {
 
 func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool) (ProxyOutput, error) {
 	start := time.Now()
+	logMeta := requestLogMeta(r, endpoint, body)
 	modelName := r.URL.Query().Get("model")
 	if modelName == "" {
 		modelName = r.Header.Get("X-FreeAi-Model")
 	}
 	if modelName == "" {
 		modelName = r.Header.Get("X-FreeModel-Model")
+	}
+	if modelName == "" {
+		modelName = logMeta.Model
 	}
 	platformKey, err := PlatformKeyServiceApp.Verify(r.Header.Get("Authorization"))
 	if err != nil {
@@ -40,38 +44,59 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			errorType = domains.ErrorPlatformKeyLimited
 		}
 		RequestLogServiceApp.Record(RequestLogInput{
-			Model:      modelName,
-			StatusCode: status,
-			ErrorType:  errorType,
-			LatencyMs:  time.Since(start).Milliseconds(),
+			Method:          logMeta.Method,
+			Path:            logMeta.Path,
+			KeyPrefix:       PlatformKeyPrefixFromHeader(r.Header.Get("Authorization")),
+			Model:           modelName,
+			ReasoningEffort: logMeta.ReasoningEffort,
+			ServiceTier:     logMeta.ServiceTier,
+			StatusCode:      status,
+			ErrorType:       errorType,
+			LatencyMs:       time.Since(start).Milliseconds(),
 		})
 		return ProxyOutput{StatusCode: status}, err
 	}
 	if platformKey.BoundModel != "" {
 		modelName = platformKey.BoundModel
+		logMeta.Model = modelName
 	}
 	if modelName == "" {
 		RequestLogServiceApp.Record(RequestLogInput{
-			PlatformKeyID: platformKey.Guid,
-			StatusCode:    http.StatusBadRequest,
-			ErrorType:     domains.ErrorModelNotSupported,
-			LatencyMs:     time.Since(start).Milliseconds(),
+			PlatformKeyID:   platformKey.Guid,
+			PlatformKey:     platformKey.Name,
+			KeyPrefix:       platformKey.KeyPrefix,
+			Method:          logMeta.Method,
+			Path:            logMeta.Path,
+			Model:           modelName,
+			ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
+			ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
+			StatusCode:      http.StatusBadRequest,
+			ErrorType:       domains.ErrorModelNotSupported,
+			LatencyMs:       time.Since(start).Milliseconds(),
 		})
 		return ProxyOutput{StatusCode: http.StatusBadRequest}, errors.New("model is required")
 	}
 	if !PlatformKeyServiceApp.ModelAllowed(platformKey, modelName) {
 		if mapping, findErr := ModelServiceApp.Find(modelName); findErr != nil || !PlatformKeyServiceApp.ModelMappingAllowed(platformKey, mapping) {
 			RequestLogServiceApp.Record(RequestLogInput{
-				PlatformKeyID: platformKey.Guid,
-				Model:         modelName,
-				StatusCode:    http.StatusForbidden,
-				ErrorType:     domains.ErrorModelNotSupported,
-				LatencyMs:     time.Since(start).Milliseconds(),
+				PlatformKeyID:   platformKey.Guid,
+				PlatformKey:     platformKey.Name,
+				KeyPrefix:       platformKey.KeyPrefix,
+				Method:          logMeta.Method,
+				Path:            logMeta.Path,
+				Model:           modelName,
+				ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
+				ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
+				StatusCode:      http.StatusForbidden,
+				ErrorType:       domains.ErrorModelNotSupported,
+				LatencyMs:       time.Since(start).Milliseconds(),
 			})
 			return ProxyOutput{StatusCode: http.StatusForbidden}, errors.New(domains.ErrorModelNotSupported)
 		}
 	}
 	body = applyPlatformKeyRequestOverrides(body, platformKey, modelName)
+	logMeta = requestLogMeta(r, endpoint, body)
+	logMeta.Model = modelName
 
 	maxAttempts := Config().MaxRetries + 1
 	if maxAttempts <= 0 {
@@ -146,22 +171,76 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		errorType = classifyError(lastErr)
 	}
 	RequestLogServiceApp.Record(RequestLogInput{
-		PlatformKeyID: platformKey.Guid,
-		AccountGuid:   lastSelection.Account.Guid,
-		Model:         modelName,
-		UpstreamModel: lastSelection.Model.UpstreamModel,
-		Provider:      lastSelection.Model.Provider,
-		StatusCode:    statusCode,
-		ErrorType:     errorType,
-		Switched:      len(switchReasons) > 0,
-		SwitchCount:   len(switchReasons),
-		SwitchReason:  strings.Join(switchReasons, ";"),
-		LatencyMs:     latencyMs,
-		FirstTokenMs:  firstTokenMs,
-		InputTokens:   inputTokens,
-		OutputTokens:  outputTokens,
+		Method:          logMeta.Method,
+		Path:            logMeta.Path,
+		PlatformKeyID:   platformKey.Guid,
+		PlatformKey:     platformKey.Name,
+		KeyPrefix:       platformKey.KeyPrefix,
+		AccountGuid:     lastSelection.Account.Guid,
+		AccountName:     lastSelection.Account.Name,
+		Model:           modelName,
+		UpstreamModel:   lastSelection.Model.UpstreamModel,
+		ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
+		ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
+		Provider:        lastSelection.Model.Provider,
+		StatusCode:      statusCode,
+		ErrorType:       errorType,
+		Switched:        len(switchReasons) > 0,
+		SwitchCount:     len(switchReasons),
+		SwitchReason:    strings.Join(switchReasons, ";"),
+		LatencyMs:       latencyMs,
+		FirstTokenMs:    firstTokenMs,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
 	})
 	return lastOutput, lastErr
+}
+
+type requestLogMetadata struct {
+	Method          string
+	Path            string
+	Model           string
+	ReasoningEffort string
+	ServiceTier     string
+}
+
+func requestLogMeta(r *http.Request, endpoint string, body []byte) requestLogMetadata {
+	meta := requestLogMetadata{
+		Method: r.Method,
+		Path:   endpoint,
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return meta
+	}
+	if model, ok := payload["model"].(string); ok {
+		meta.Model = strings.TrimSpace(model)
+	}
+	if reasoning, ok := payload["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok {
+			meta.ReasoningEffort = strings.TrimSpace(effort)
+		}
+	}
+	if meta.ReasoningEffort == "" {
+		if effort, ok := payload["reasoning_effort"].(string); ok {
+			meta.ReasoningEffort = strings.TrimSpace(effort)
+		}
+	}
+	if serviceTier, ok := payload["service_tier"].(string); ok {
+		meta.ServiceTier = strings.TrimSpace(serviceTier)
+	}
+	return meta
+}
+
+func PlatformKeyPrefixFromHeader(header string) string {
+	token := strings.TrimSpace(header)
+	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
+		token = strings.TrimSpace(token[7:])
+	}
+	if len(token) <= 10 {
+		return token
+	}
+	return token[:10]
 }
 
 func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, modelName string) []byte {

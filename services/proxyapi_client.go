@@ -82,11 +82,12 @@ func (FreeModelProxyAPIClient) Do(ctx context.Context, provider ProxyProviderCon
 		return nil, err
 	}
 	return &ProxyResult{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       body,
-		Usage:      usageFromResponse(resp),
-		LatencyMs:  time.Since(start).Milliseconds(),
+		StatusCode:   http.StatusOK,
+		Header:       http.Header{"Content-Type": []string{"application/json"}},
+		Body:         body,
+		Usage:        usageFromResponse(resp),
+		FirstTokenMs: time.Since(start).Milliseconds(),
+		LatencyMs:    time.Since(start).Milliseconds(),
 	}, nil
 }
 
@@ -158,11 +159,13 @@ func newProxyClient(provider ProxyProviderConfig, credential ProxyCredential) *p
 	if wireAPI == "" {
 		wireAPI = compatible.WireAPIResponses
 	}
+	httpClient, _ := UpstreamHTTPClient()
 	return proxyapi.NewClient(
 		proxyapi.WithProvider(compatible.OpenAIResponses(compatible.Config{
-			Name:    provider.Name,
-			BaseURL: provider.BaseURL,
-			WireAPI: wireAPI,
+			Name:       provider.Name,
+			BaseURL:    provider.BaseURL,
+			WireAPI:    wireAPI,
+			HTTPClient: httpClient,
 		})),
 		proxyapi.WithCredential(proxyCredential(credential)),
 	)
@@ -352,11 +355,12 @@ func apiErrorResult(err error, latencyMs int64) (*ProxyResult, error) {
 		return nil, marshalErr
 	}
 	return &ProxyResult{
-		StatusCode: status,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       body,
-		ErrorType:  errorType,
-		LatencyMs:  latencyMs,
+		StatusCode:   status,
+		Header:       http.Header{"Content-Type": []string{"application/json"}},
+		Body:         body,
+		ErrorType:    errorType,
+		FirstTokenMs: latencyMs,
+		LatencyMs:    latencyMs,
 	}, nil
 }
 
@@ -377,20 +381,26 @@ func rawForward(ctx context.Context, provider ProxyProviderConfig, credential Pr
 		return nil, err
 	}
 	httpReq.Header.Set("Authorization", authHeader)
-	resp, err := http.DefaultClient.Do(httpReq)
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return &ProxyResult{StatusCode: http.StatusBadGateway, ErrorType: classifyError(err), LatencyMs: time.Since(start).Milliseconds()}, nil
 	}
+	firstTokenMs := time.Since(start).Milliseconds()
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	result := &ProxyResult{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		Body:       respBody,
-		LatencyMs:  time.Since(start).Milliseconds(),
+		StatusCode:   resp.StatusCode,
+		Header:       resp.Header.Clone(),
+		Body:         respBody,
+		FirstTokenMs: firstTokenMs,
+		LatencyMs:    time.Since(start).Milliseconds(),
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.ErrorType = classifyHTTPStatus(resp.StatusCode, respBody)

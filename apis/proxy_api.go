@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"freeai/services"
 
@@ -21,13 +22,33 @@ type ProxyApi struct{}
 // @Success 200 {object} object
 // @Router /v1/models [get]
 func (a ProxyApi) Models(c *gin.Context) {
+	start := time.Now()
+	path := c.Request.URL.Path
 	key, err := services.PlatformKeyServiceApp.Verify(c.GetHeader("Authorization"))
 	if err != nil {
+		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			Method:     c.Request.Method,
+			Path:       path,
+			KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
+			StatusCode: http.StatusUnauthorized,
+			ErrorType:  "platform_key_invalid",
+			LatencyMs:  time.Since(start).Milliseconds(),
+		})
 		c.JSON(http.StatusUnauthorized, openAIError("platform_key_invalid", err.Error()))
 		return
 	}
 	models, err := services.ModelServiceApp.ListEnabled()
 	if err != nil {
+		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			Method:        c.Request.Method,
+			Path:          path,
+			PlatformKeyID: key.Guid,
+			PlatformKey:   key.Name,
+			KeyPrefix:     key.KeyPrefix,
+			StatusCode:    http.StatusInternalServerError,
+			ErrorType:     "server_error",
+			LatencyMs:     time.Since(start).Milliseconds(),
+		})
 		c.JSON(http.StatusInternalServerError, openAIError("server_error", err.Error()))
 		return
 	}
@@ -44,6 +65,15 @@ func (a ProxyApi) Models(c *gin.Context) {
 			})
 		}
 	}
+	services.RequestLogServiceApp.Record(services.RequestLogInput{
+		Method:        c.Request.Method,
+		Path:          path,
+		PlatformKeyID: key.Guid,
+		PlatformKey:   key.Name,
+		KeyPrefix:     key.KeyPrefix,
+		StatusCode:    http.StatusOK,
+		LatencyMs:     time.Since(start).Milliseconds(),
+	})
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 

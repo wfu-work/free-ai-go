@@ -32,3 +32,5 @@ freeai:
   cleanup-log-retention-days: 30
   secret-key-file: ./data/master.key
   log-prompt-content: false
+  upstream-proxy-enabled: false
+  upstream-proxy-url: ""

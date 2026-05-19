@@ -446,7 +446,11 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 		return nil, err
 	}
 	req.Header.Set("Authorization", authHeader)
-	resp, err := http.DefaultClient.Do(req)
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -570,7 +574,11 @@ func exchangeOpenAIOAuthCode(code, codeVerifier, redirectURI string) (openAIOAut
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return openAIOAuthTokenResponse{}, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return openAIOAuthTokenResponse{}, err
 	}
@@ -727,7 +735,11 @@ func (s AccountService) fetchCodexZHUsage(account domains.Account, secret string
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}

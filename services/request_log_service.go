@@ -16,40 +16,54 @@ type RequestLogService struct{}
 var RequestLogServiceApp = RequestLogService{}
 
 type RequestLogInput struct {
-	PlatformKeyID string
-	AccountGuid   string
-	Model         string
-	UpstreamModel string
-	Provider      string
-	StatusCode    int
-	ErrorType     string
-	Switched      bool
-	SwitchCount   int
-	SwitchReason  string
-	LatencyMs     int64
-	FirstTokenMs  int64
-	InputTokens   int64
-	OutputTokens  int64
+	Method          string
+	Path            string
+	PlatformKeyID   string
+	PlatformKey     string
+	KeyPrefix       string
+	AccountGuid     string
+	AccountName     string
+	Model           string
+	UpstreamModel   string
+	ReasoningEffort string
+	ServiceTier     string
+	Provider        string
+	StatusCode      int
+	ErrorType       string
+	Switched        bool
+	SwitchCount     int
+	SwitchReason    string
+	LatencyMs       int64
+	FirstTokenMs    int64
+	InputTokens     int64
+	OutputTokens    int64
 }
 
 func (s RequestLogService) Record(input RequestLogInput) {
 	_ = global.NAV_DB.Create(&domains.RequestLog{
-		RequestID:     uuid.NewString(),
-		PlatformKeyID: input.PlatformKeyID,
-		AccountGuid:   input.AccountGuid,
-		Model:         input.Model,
-		UpstreamModel: input.UpstreamModel,
-		Provider:      input.Provider,
-		StatusCode:    input.StatusCode,
-		ErrorType:     input.ErrorType,
-		Switched:      input.Switched,
-		SwitchCount:   input.SwitchCount,
-		SwitchReason:  input.SwitchReason,
-		LatencyMs:     input.LatencyMs,
-		FirstTokenMs:  input.FirstTokenMs,
-		InputTokens:   input.InputTokens,
-		OutputTokens:  input.OutputTokens,
-		CreatedAtUnix: time.Now().UnixMilli(),
+		RequestID:       uuid.NewString(),
+		Method:          input.Method,
+		Path:            input.Path,
+		PlatformKeyID:   input.PlatformKeyID,
+		PlatformKey:     input.PlatformKey,
+		KeyPrefix:       input.KeyPrefix,
+		AccountGuid:     input.AccountGuid,
+		AccountName:     input.AccountName,
+		Model:           input.Model,
+		UpstreamModel:   input.UpstreamModel,
+		ReasoningEffort: input.ReasoningEffort,
+		ServiceTier:     input.ServiceTier,
+		Provider:        input.Provider,
+		StatusCode:      input.StatusCode,
+		ErrorType:       input.ErrorType,
+		Switched:        input.Switched,
+		SwitchCount:     input.SwitchCount,
+		SwitchReason:    input.SwitchReason,
+		LatencyMs:       input.LatencyMs,
+		FirstTokenMs:    input.FirstTokenMs,
+		InputTokens:     input.InputTokens,
+		OutputTokens:    input.OutputTokens,
+		CreatedAtUnix:   time.Now().UnixMilli(),
 	}).Error
 }
 
@@ -78,7 +92,7 @@ func (s RequestLogService) List(params map[string]string) (list interface{}, tot
 	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("request_id LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR provider LIKE ? OR error_type LIKE ?", like, like, like, like, like)
+		db = db.Where("request_id LIKE ? OR method LIKE ? OR path LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR provider LIKE ? OR error_type LIKE ? OR account_name LIKE ? OR platform_key LIKE ? OR key_prefix LIKE ?", like, like, like, like, like, like, like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -87,9 +101,19 @@ func (s RequestLogService) List(params map[string]string) (list interface{}, tot
 	return results, total, err
 }
 
-func (s RequestLogService) ListAll() ([]domains.RequestLog, error) {
+func (s RequestLogService) ListAll(limit int, since int64) ([]domains.RequestLog, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
 	var list []domains.RequestLog
-	err := global.NAV_DB.Order("id desc").Limit(5000).Find(&list).Error
+	db := global.NAV_DB.Model(new(domains.RequestLog))
+	if since > 0 {
+		db = db.Where("created_at_unix >= ?", since)
+	}
+	err := db.Order("id desc").Limit(limit).Find(&list).Error
 	return list, err
 }
 
