@@ -16,6 +16,7 @@ import (
 	fmgutils "freeai/utils"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -184,25 +185,58 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 	return s.Get(guid)
 }
 
-func (s AccountService) Get(guid string) (domains.Account, error) {
+func (s AccountService) GetByGuid(guid string) (domains.Account, error) {
 	var account domains.Account
 	err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error
 	return account, err
 }
 
-func (s AccountService) List(limit int) ([]domains.Account, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
+func (s AccountService) Get(guid string) (domains.Account, error) {
+	return s.GetByGuid(guid)
+}
+
+func (s AccountService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := commonUtils.Str2Int(params["size"])
+	offset := limit * (commonUtils.Str2Int(params["page"]) - 1)
+	var results []domains.Account
+	db := global.NAV_DB.Model(new(domains.Account))
+	if params["enabled"] != "" {
+		db = db.Where("enabled = ?", params["enabled"])
 	}
+	if params["provider"] != "" {
+		db = db.Where("provider = ?", params["provider"])
+	}
+	if params["accountGroup"] != "" {
+		db = db.Where("account_group = ?", params["accountGroup"])
+	}
+	if params["status"] != "" {
+		db = db.Where("status = ?", params["status"])
+	}
+	if params["content"] != "" {
+		like := "%" + params["content"] + "%"
+		db = db.Where("name LIKE ? OR email LIKE ? OR provider LIKE ? OR supplier_name LIKE ?", like, like, like, like)
+	}
+	if err = db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err = db.Order("priority asc, id desc").Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s AccountService) ListAll() ([]domains.Account, error) {
 	var list []domains.Account
-	err := global.NAV_DB.Order("priority asc, id desc").Limit(limit).Find(&list).Error
+	err := global.NAV_DB.Order("priority asc, id desc").Find(&list).Error
 	return list, err
 }
 
-func (s AccountService) Delete(guid string) error {
+func (s AccountService) DeleteByGuid(guid string) error {
 	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.Account{}).Error
 	AuditServiceApp.Record("", "account.delete", "account", guid, nil)
 	return err
+}
+
+func (s AccountService) Delete(guid string) error {
+	return s.DeleteByGuid(guid)
 }
 
 func (s AccountService) Refresh(guid string) (domains.Account, error) {
@@ -223,11 +257,11 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 	}
 	AuditServiceApp.Record("", "account.refresh", "account", guid, nil)
 	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
-	return s.Get(guid)
+	return s.GetByGuid(guid)
 }
 
 func (s AccountService) Test(guid string, input AccountTestInput) (map[string]any, error) {
-	account, err := s.Get(guid)
+	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return nil, err
 	}

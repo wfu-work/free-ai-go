@@ -13,10 +13,11 @@ func (r AccountGroupRouter) InitAccountGroupRouter(group *gin.RouterGroup) {
 	{
 		routerLogger.POST("", accountGroupApi.Create)
 		routerLogger.PUT(":guid", accountGroupApi.Update)
-		routerLogger.DELETE(":guid", accountGroupApi.Delete)
+		routerLogger.DELETE(":guid", accountGroupApi.DeleteByGuid)
 	}
 	{
-		router.GET("", accountGroupApi.List)
-		router.GET(":guid", accountGroupApi.Detail)
+		router.GET("list", accountGroupApi.List)
+		router.GET("list/all", accountGroupApi.ListAll)
+		router.GET(":guid", accountGroupApi.GetByGuid)
 	}
 }

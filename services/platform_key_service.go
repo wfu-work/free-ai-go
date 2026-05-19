@@ -11,6 +11,7 @@ import (
 	fmgutils "freeai/utils"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	"github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -65,19 +66,40 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 	return CreatePlatformKeyOutput{Key: key, Entity: entity}, err
 }
 
-func (s PlatformKeyService) List(limit int) ([]domains.PlatformKey, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
+func (s PlatformKeyService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := utils.Str2Int(params["size"])
+	offset := utils.Str2Int(params["size"]) * (utils.Str2Int(params["page"]) - 1)
+	var results []domains.PlatformKey
+	db := global.NAV_DB
+	if params["enabled"] != "" {
+		db = db.Where("enabled = ?", params["enabled"])
 	}
-	var list []domains.PlatformKey
-	err := global.NAV_DB.Order("id desc").Limit(limit).Find(&list).Error
+	if params["content"] != "" {
+		db = db.Where("name LIKE ? OR key_prefix LIKE ? OR remark LIKE ?", "%"+params["content"]+"%", "%"+params["content"]+"%", "%"+params["content"]+"%")
+	}
+	db = db.Model(new(domains.PlatformKey))
+	err = db.Count(&total).Error
+	if err != nil {
+		return
+	}
+	order := "id desc"
+	err = db.Order(order).Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s PlatformKeyService) ListAll() (list []domains.PlatformKey, err error) {
+	err = global.NAV_DB.Order("id desc").Find(&list).Error
 	return list, err
 }
 
-func (s PlatformKeyService) Get(guid string) (domains.PlatformKey, error) {
+func (s PlatformKeyService) GetByGuid(guid string) (domains.PlatformKey, error) {
 	var key domains.PlatformKey
 	err := global.NAV_DB.Where("guid = ?", guid).First(&key).Error
 	return key, err
+}
+
+func (s PlatformKeyService) Get(guid string) (domains.PlatformKey, error) {
+	return s.GetByGuid(guid)
 }
 
 func (s PlatformKeyService) Update(guid string, input CreatePlatformKeyInput) (domains.PlatformKey, error) {
@@ -100,10 +122,14 @@ func (s PlatformKeyService) Update(guid string, input CreatePlatformKeyInput) (d
 	return s.Get(guid)
 }
 
-func (s PlatformKeyService) Delete(guid string) error {
+func (s PlatformKeyService) DeleteByGuid(guid string) error {
 	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.PlatformKey{}).Error
 	AuditServiceApp.Record("", "platform_key.delete", "platform_key", guid, nil)
 	return err
+}
+
+func (s PlatformKeyService) Delete(guid string) error {
+	return s.DeleteByGuid(guid)
 }
 
 func (s PlatformKeyService) SetEnabled(guid string, enabled bool) error {

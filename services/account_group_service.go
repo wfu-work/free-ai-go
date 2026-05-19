@@ -7,6 +7,7 @@ import (
 	"freeai/domains"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -70,19 +71,41 @@ func (s AccountGroupService) Update(guid string, input AccountGroupInput) (domai
 	return s.Get(guid)
 }
 
-func (s AccountGroupService) Get(guid string) (domains.AccountGroup, error) {
+func (s AccountGroupService) GetByGuid(guid string) (domains.AccountGroup, error) {
 	var entity domains.AccountGroup
 	err := global.NAV_DB.Where("guid = ?", guid).First(&entity).Error
 	return entity, err
 }
 
-func (s AccountGroupService) List() ([]domains.AccountGroup, error) {
+func (s AccountGroupService) Get(guid string) (domains.AccountGroup, error) {
+	return s.GetByGuid(guid)
+}
+
+func (s AccountGroupService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := commonUtils.Str2Int(params["size"])
+	offset := limit * (commonUtils.Str2Int(params["page"]) - 1)
+	var results []domains.AccountGroup
+	db := global.NAV_DB.Model(new(domains.AccountGroup))
+	if params["enabled"] != "" {
+		db = db.Where("enabled = ?", params["enabled"])
+	}
+	if params["content"] != "" {
+		db = db.Where("name LIKE ? OR description LIKE ?", "%"+params["content"]+"%", "%"+params["content"]+"%")
+	}
+	if err = db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err = db.Order("sort asc, id asc").Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s AccountGroupService) ListAll() ([]domains.AccountGroup, error) {
 	var list []domains.AccountGroup
 	err := global.NAV_DB.Order("sort asc, id asc").Find(&list).Error
 	return list, err
 }
 
-func (s AccountGroupService) Delete(guid string) error {
+func (s AccountGroupService) DeleteByGuid(guid string) error {
 	var entity domains.AccountGroup
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&entity).Error; err != nil {
 		return err
@@ -97,6 +120,10 @@ func (s AccountGroupService) Delete(guid string) error {
 	err := global.NAV_DB.Delete(&entity).Error
 	AuditServiceApp.Record("", "account_group.delete", "account_group", guid, map[string]string{"name": entity.Name})
 	return err
+}
+
+func (s AccountGroupService) Delete(guid string) error {
+	return s.DeleteByGuid(guid)
 }
 
 func (s AccountGroupService) EnsureDefaults() error {

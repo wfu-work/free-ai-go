@@ -13,7 +13,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 	{
 		routerLogger.POST("", accountApi.Create)
 		routerLogger.PUT(":guid", accountApi.Update)
-		routerLogger.DELETE(":guid", accountApi.Delete)
+		routerLogger.DELETE(":guid", accountApi.DeleteByGuid)
 		routerLogger.POST(":guid/enable", accountApi.Enable)
 		routerLogger.POST(":guid/disable", accountApi.Disable)
 		routerLogger.POST(":guid/refresh", accountApi.Refresh)
@@ -23,7 +23,8 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		routerLogger.POST("reorder", accountApi.Reorder)
 	}
 	{
-		router.GET("", accountApi.List)
-		router.GET(":guid", accountApi.Detail)
+		router.GET("list", accountApi.List)
+		router.GET("list/all", accountApi.ListAll)
+		router.GET(":guid", accountApi.GetByGuid)
 	}
 }

@@ -12,6 +12,15 @@ import (
 
 type OpsApi struct{}
 
+// Metrics 获取运维指标
+// @Summary 获取运维指标
+// @Description 获取运维指标
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=object,msg=string}
+// @Router /ops/metrics [get]
 func (a OpsApi) Metrics(c *gin.Context) {
 	var accounts int64
 	var availableAccounts int64
@@ -31,6 +40,15 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	}, c)
 }
 
+// Stats 获取请求统计
+// @Summary 获取请求统计
+// @Description 获取请求统计
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=object,msg=string}
+// @Router /ops/stats [get]
 func (a OpsApi) Stats(c *gin.Context) {
 	stats, err := requestLogService.Stats()
 	if err != nil {
@@ -40,6 +58,15 @@ func (a OpsApi) Stats(c *gin.Context) {
 	response.Ok(stats, c)
 }
 
+// Routes 获取路由状态
+// @Summary 获取路由状态
+// @Description 获取路由状态
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=[]domains.RouteState,msg=string}
+// @Router /ops/routes [get]
 func (a OpsApi) Routes(c *gin.Context) {
 	var routes []domains.RouteState
 	if err := global.NAV_DB.Order("updated_at_unix desc").Limit(200).Find(&routes).Error; err != nil {
@@ -49,6 +76,15 @@ func (a OpsApi) Routes(c *gin.Context) {
 	response.Ok(routes, c)
 }
 
+// AccountHealth 获取账号健康度
+// @Summary 获取账号健康度
+// @Description 获取账号健康度
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=[]object,msg=string}
+// @Router /ops/account-health [get]
 func (a OpsApi) AccountHealth(c *gin.Context) {
 	var accounts []domains.Account
 	if err := global.NAV_DB.Order("provider asc, account_group asc, priority asc, id desc").Find(&accounts).Error; err != nil {
@@ -92,6 +128,15 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 	response.Ok(items, c)
 }
 
+// MasterKey 获取主密钥状态
+// @Summary 获取主密钥状态
+// @Description 获取主密钥状态
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response{data=utils.MasterKeyStatus,msg=string}
+// @Router /ops/master-key [get]
 func (a OpsApi) MasterKey(c *gin.Context) {
 	response.Ok(fmgutils.CheckMasterKey(services.Config().SecretKeyFile), c)
 }

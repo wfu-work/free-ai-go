@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wfu-work/nav-common-go-lib/global"
+	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -52,19 +53,58 @@ func (s RequestLogService) Record(input RequestLogInput) {
 	}).Error
 }
 
-func (s RequestLogService) List(limit int) ([]domains.RequestLog, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 200
+func (s RequestLogService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := commonUtils.Str2Int(params["size"])
+	offset := limit * (commonUtils.Str2Int(params["page"]) - 1)
+	var results []domains.RequestLog
+	db := global.NAV_DB.Model(new(domains.RequestLog))
+	if params["platformKeyId"] != "" {
+		db = db.Where("platform_key_id = ?", params["platformKeyId"])
 	}
+	if params["accountGuid"] != "" {
+		db = db.Where("account_guid = ?", params["accountGuid"])
+	}
+	if params["model"] != "" {
+		db = db.Where("model = ?", params["model"])
+	}
+	if params["provider"] != "" {
+		db = db.Where("provider = ?", params["provider"])
+	}
+	if params["errorType"] != "" {
+		db = db.Where("error_type = ?", params["errorType"])
+	}
+	if params["statusCode"] != "" {
+		db = db.Where("status_code = ?", params["statusCode"])
+	}
+	if params["content"] != "" {
+		like := "%" + params["content"] + "%"
+		db = db.Where("request_id LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR provider LIKE ? OR error_type LIKE ?", like, like, like, like, like)
+	}
+	if err = db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err = db.Order("id desc").Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s RequestLogService) ListAll() ([]domains.RequestLog, error) {
 	var list []domains.RequestLog
-	err := global.NAV_DB.Order("id desc").Limit(limit).Find(&list).Error
+	err := global.NAV_DB.Order("id desc").Limit(5000).Find(&list).Error
 	return list, err
 }
 
-func (s RequestLogService) Get(guid string) (domains.RequestLog, error) {
+func (s RequestLogService) GetByGuid(guid string) (domains.RequestLog, error) {
 	var log domains.RequestLog
 	err := global.NAV_DB.Where("guid = ?", guid).First(&log).Error
 	return log, err
+}
+
+func (s RequestLogService) Get(guid string) (domains.RequestLog, error) {
+	return s.GetByGuid(guid)
+}
+
+func (s RequestLogService) DeleteByGuid(guid string) error {
+	return global.NAV_DB.Where("guid = ?", guid).Delete(&domains.RequestLog{}).Error
 }
 
 func (s RequestLogService) ClearBefore(cutoffMs int64) error {

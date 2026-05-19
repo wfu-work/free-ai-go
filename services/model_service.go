@@ -8,6 +8,7 @@ import (
 	"freeai/domains"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -73,18 +74,44 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	return s.Get(guid)
 }
 
-func (s ModelService) Get(guid string) (domains.ModelMapping, error) {
+func (s ModelService) GetByGuid(guid string) (domains.ModelMapping, error) {
 	var model domains.ModelMapping
 	err := global.NAV_DB.Where("guid = ?", guid).First(&model).Error
 	return model, err
 }
 
-func (s ModelService) List(limit int) ([]domains.ModelMapping, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 200
+func (s ModelService) Get(guid string) (domains.ModelMapping, error) {
+	return s.GetByGuid(guid)
+}
+
+func (s ModelService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := commonUtils.Str2Int(params["size"])
+	offset := limit * (commonUtils.Str2Int(params["page"]) - 1)
+	var results []domains.ModelMapping
+	db := global.NAV_DB.Model(new(domains.ModelMapping))
+	if params["enabled"] != "" {
+		db = db.Where("enabled = ?", params["enabled"])
 	}
+	if params["provider"] != "" {
+		db = db.Where("provider = ?", params["provider"])
+	}
+	if params["accountGroup"] != "" {
+		db = db.Where("account_group = ?", params["accountGroup"])
+	}
+	if params["content"] != "" {
+		like := "%" + params["content"] + "%"
+		db = db.Where("public_model LIKE ? OR aliases LIKE ? OR upstream_model LIKE ? OR provider LIKE ?", like, like, like, like)
+	}
+	if err = db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err = db.Order("id desc").Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s ModelService) ListAll() ([]domains.ModelMapping, error) {
 	var list []domains.ModelMapping
-	err := global.NAV_DB.Order("id desc").Limit(limit).Find(&list).Error
+	err := global.NAV_DB.Order("id desc").Find(&list).Error
 	return list, err
 }
 
@@ -162,6 +189,10 @@ func normalizeAliases(values []string) []string {
 }
 
 func (s ModelService) Delete(guid string) error {
+	return s.DeleteByGuid(guid)
+}
+
+func (s ModelService) DeleteByGuid(guid string) error {
 	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.ModelMapping{}).Error
 	AuditServiceApp.Record("", "model.delete", "model", guid, nil)
 	return err

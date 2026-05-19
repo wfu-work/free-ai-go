@@ -11,8 +11,10 @@ func (r RequestLogRouter) InitRequestLogRouter(group *gin.RouterGroup) {
 	routerLogger := group.Group("request-logs").Use(middlewares.ApiLogger())
 	router := group.Group("request-logs")
 	{
-		router.GET("", requestLogApi.List)
-		router.GET(":guid", requestLogApi.Detail)
+		router.GET("list", requestLogApi.List)
+		router.GET("list/all", requestLogApi.ListAll)
+		router.GET(":guid", requestLogApi.GetByGuid)
+		routerLogger.DELETE(":guid", requestLogApi.DeleteByGuid)
 		routerLogger.DELETE("", requestLogApi.Clear)
 	}
 }

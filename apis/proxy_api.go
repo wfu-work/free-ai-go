@@ -12,6 +12,14 @@ import (
 
 type ProxyApi struct{}
 
+// Models 获取模型列表
+// @Summary 获取OpenAI兼容模型列表
+// @Description 获取当前平台密钥可访问的模型列表
+// @Tags 代理模块
+// @Accept json
+// @Produce json
+// @Success 200 {object} object
+// @Router /v1/models [get]
 func (a ProxyApi) Models(c *gin.Context) {
 	key, err := services.PlatformKeyServiceApp.Verify(c.GetHeader("Authorization"))
 	if err != nil {
@@ -39,19 +47,40 @@ func (a ProxyApi) Models(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 
+// ChatCompletions OpenAI Chat Completions代理
+// @Summary OpenAI Chat Completions代理
+// @Description OpenAI兼容Chat Completions代理入口
+// @Tags 代理模块
+// @Accept json
+// @Produce json
+// @Router /v1/chat/completions [post]
 func (a ProxyApi) ChatCompletions(c *gin.Context) {
-	a.forward(c, "/v1/chat/completions")
+	forwardProxy(c, "/v1/chat/completions")
 }
 
+// Responses OpenAI Responses代理
+// @Summary OpenAI Responses代理
+// @Description OpenAI兼容Responses代理入口
+// @Tags 代理模块
+// @Accept json
+// @Produce json
+// @Router /v1/responses [post]
 func (a ProxyApi) Responses(c *gin.Context) {
-	a.forward(c, "/v1/responses")
+	forwardProxy(c, "/v1/responses")
 }
 
+// Embeddings OpenAI Embeddings代理
+// @Summary OpenAI Embeddings代理
+// @Description OpenAI兼容Embeddings代理入口
+// @Tags 代理模块
+// @Accept json
+// @Produce json
+// @Router /v1/embeddings [post]
 func (a ProxyApi) Embeddings(c *gin.Context) {
-	a.forward(c, "/v1/embeddings")
+	forwardProxy(c, "/v1/embeddings")
 }
 
-func (a ProxyApi) forward(c *gin.Context, endpoint string) {
+func forwardProxy(c *gin.Context, endpoint string) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))

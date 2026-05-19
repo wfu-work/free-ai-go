@@ -7,6 +7,7 @@ import (
 	"freeai/domains"
 
 	"github.com/wfu-work/nav-common-go-lib/global"
+	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -82,14 +83,39 @@ func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
 	return quota, err
 }
 
-func (s QuotaService) List(accountGuid string) ([]domains.AccountQuota, error) {
-	var list []domains.AccountQuota
-	query := global.NAV_DB.Order("id desc")
-	if accountGuid != "" {
-		query = query.Where("account_guid = ?", accountGuid)
+func (s QuotaService) List(params map[string]string) (list interface{}, total int64, err error) {
+	limit := commonUtils.Str2Int(params["size"])
+	offset := limit * (commonUtils.Str2Int(params["page"]) - 1)
+	var results []domains.AccountQuota
+	db := global.NAV_DB.Model(new(domains.AccountQuota))
+	if params["accountGuid"] != "" {
+		db = db.Where("account_guid = ?", params["accountGuid"])
 	}
-	err := query.Find(&list).Error
+	if params["windowType"] != "" {
+		db = db.Where("window_type = ?", params["windowType"])
+	}
+	if params["status"] != "" {
+		db = db.Where("status = ?", params["status"])
+	}
+	if err = db.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	err = db.Order("id desc").Limit(limit).Offset(offset).Find(&results).Error
+	return results, total, err
+}
+
+func (s QuotaService) ListAll(accountGuid string) ([]domains.AccountQuota, error) {
+	var list []domains.AccountQuota
+	db := global.NAV_DB.Order("id desc")
+	if accountGuid != "" {
+		db = db.Where("account_guid = ?", accountGuid)
+	}
+	err := db.Find(&list).Error
 	return list, err
+}
+
+func (s QuotaService) ListByAccount(accountGuid string) ([]domains.AccountQuota, error) {
+	return s.ListAll(accountGuid)
 }
 
 func (s QuotaService) ApplyError(accountGuid, errorType string) {

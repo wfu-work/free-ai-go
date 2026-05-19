@@ -13,12 +13,13 @@ func (r PlatformKeyRouter) InitPlatformKeyRouter(group *gin.RouterGroup) {
 	{
 		routerLogger.POST("", platformKeyApi.Create)
 		routerLogger.PUT(":guid", platformKeyApi.Update)
-		routerLogger.DELETE(":guid", platformKeyApi.Delete)
+		routerLogger.DELETE(":guid", platformKeyApi.DeleteByGuid)
 		routerLogger.POST(":guid/enable", platformKeyApi.Enable)
 		routerLogger.POST(":guid/disable", platformKeyApi.Disable)
 	}
 	{
-		router.GET("", platformKeyApi.List)
-		router.GET(":guid", platformKeyApi.Detail)
+		router.GET("list", platformKeyApi.List)
+		router.GET("list/all", platformKeyApi.ListAll)
+		router.GET(":guid", platformKeyApi.GetByGuid)
 	}
 }

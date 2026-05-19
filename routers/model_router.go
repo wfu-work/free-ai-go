@@ -13,12 +13,13 @@ func (r ModelRouter) InitModelRouter(group *gin.RouterGroup) {
 	{
 		routerLogger.POST("", modelApi.Create)
 		routerLogger.PUT(":guid", modelApi.Update)
-		routerLogger.DELETE(":guid", modelApi.Delete)
+		routerLogger.DELETE(":guid", modelApi.DeleteByGuid)
 		routerLogger.POST(":guid/enable", modelApi.Enable)
 		routerLogger.POST(":guid/disable", modelApi.Disable)
 	}
 	{
-		router.GET("", modelApi.List)
-		router.GET(":guid", modelApi.Detail)
+		router.GET("list", modelApi.List)
+		router.GET("list/all", modelApi.ListAll)
+		router.GET(":guid", modelApi.GetByGuid)
 	}
 }
