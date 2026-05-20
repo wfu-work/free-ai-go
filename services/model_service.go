@@ -27,10 +27,14 @@ type ModelInput struct {
 }
 
 func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
-	if input.PublicModel == "" || input.UpstreamModel == "" || input.Provider == "" {
-		return domains.ModelMapping{}, errors.New("publicModel, upstreamModel and provider are required")
+	input.PublicModel = strings.TrimSpace(input.PublicModel)
+	input.UpstreamModel = strings.TrimSpace(input.UpstreamModel)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.Aliases = strings.TrimSpace(input.Aliases)
+	if input.PublicModel == "" || input.UpstreamModel == "" {
+		return domains.ModelMapping{}, errors.New("publicModel and upstreamModel are required")
 	}
-	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
+	input.AccountGroup = normalizeModelAccountGroup(input.AccountGroup)
 	if input.TimeoutSec <= 0 {
 		input.TimeoutSec = int(Config().RequestTimeoutSeconds)
 	}
@@ -57,10 +61,14 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&model).Error; err != nil {
 		return domains.ModelMapping{}, err
 	}
-	if input.PublicModel == "" || input.UpstreamModel == "" || input.Provider == "" {
-		return domains.ModelMapping{}, errors.New("publicModel, upstreamModel and provider are required")
+	input.PublicModel = strings.TrimSpace(input.PublicModel)
+	input.UpstreamModel = strings.TrimSpace(input.UpstreamModel)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.Aliases = strings.TrimSpace(input.Aliases)
+	if input.PublicModel == "" || input.UpstreamModel == "" {
+		return domains.ModelMapping{}, errors.New("publicModel and upstreamModel are required")
 	}
-	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
+	input.AccountGroup = normalizeModelAccountGroup(input.AccountGroup)
 	if input.TimeoutSec <= 0 {
 		input.TimeoutSec = int(Config().RequestTimeoutSeconds)
 	}
@@ -198,6 +206,10 @@ func normalizeAliases(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func normalizeModelAccountGroup(value string) string {
+	return strings.TrimSpace(value)
 }
 
 func (s ModelService) Delete(guid string) error {

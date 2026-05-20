@@ -185,3 +185,35 @@ func (a PlatformKeyApi) Disable(c *gin.Context) {
 	}
 	response.Ok(true, c)
 }
+
+// CodexConfigPreview 预览 Codex 本地配置
+// @Router /platform-keys/codex-config/preview [post]
+func (a PlatformKeyApi) CodexConfigPreview(c *gin.Context) {
+	var input services.CodexConfigInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	out, err := services.CodexConfigServiceApp.Preview(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(out, c)
+}
+
+// CodexConfigApply 写入 Codex 本地配置
+// @Router /platform-keys/codex-config/apply [post]
+func (a PlatformKeyApi) CodexConfigApply(c *gin.Context) {
+	var input services.CodexConfigInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	out, err := services.CodexConfigServiceApp.Apply(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(out, c)
+}

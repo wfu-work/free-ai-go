@@ -54,6 +54,7 @@ func registerTables() {
 		domains.RequestLog{},
 		domains.RouteState{},
 		domains.AuditLog{},
+		domains.SystemConfig{},
 	); err != nil {
 		global.NAV_LOG.Error("register FreeAiGo tables failed", zap.Error(err))
 		os.Exit(1)

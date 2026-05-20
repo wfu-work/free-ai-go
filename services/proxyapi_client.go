@@ -459,12 +459,12 @@ func classifyAPIError(err *proxydomains.APIError) string {
 	}
 	text := strings.ToLower(err.Code + " " + err.Type + " " + err.Message)
 	switch {
+	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
+		return "quota_exhausted"
 	case err.StatusCode == http.StatusUnauthorized || err.StatusCode == http.StatusForbidden:
 		return "auth_failed"
 	case err.StatusCode == http.StatusTooManyRequests:
 		return "rate_limited"
-	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
-		return "quota_exhausted"
 	case err.StatusCode == http.StatusRequestTimeout || err.StatusCode == http.StatusGatewayTimeout:
 		return "upstream_timeout"
 	case err.StatusCode >= 500:
@@ -475,19 +475,18 @@ func classifyAPIError(err *proxydomains.APIError) string {
 }
 
 func classifyHTTPStatus(status int, body []byte) string {
+	text := strings.ToLower(string(body))
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return "auth_failed"
+	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
+		return "quota_exhausted"
 	case status == http.StatusTooManyRequests:
 		return "rate_limited"
 	case status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout:
 		return "upstream_timeout"
 	case status >= 500:
 		return "upstream_5xx"
-	}
-	text := strings.ToLower(string(body))
-	if strings.Contains(text, "quota") || strings.Contains(text, "insufficient") {
-		return "quota_exhausted"
 	}
 	return "network_error"
 }

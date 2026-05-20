@@ -30,9 +30,46 @@ type FreeModelConfig struct {
 }
 
 type GatewayProxyConfigInput struct {
-	UpstreamProxyEnabled bool   `json:"upstreamProxyEnabled"`
-	UpstreamProxyURL     string `json:"upstreamProxyUrl"`
+	ListenAddress               string `json:"listenAddress"`
+	AccountSelectionStrategy    string `json:"accountSelectionStrategy"`
+	FreeAccountModel            string `json:"freeAccountModel"`
+	ModelRewriteRules           string `json:"modelRewriteRules"`
+	Originator                  string `json:"originator"`
+	Residency                   string `json:"residency"`
+	UpstreamProxyEnabled        bool   `json:"upstreamProxyEnabled"`
+	UpstreamProxyURL            string `json:"upstreamProxyUrl"`
+	SSEKeepAliveMs              int64  `json:"sseKeepAliveMs"`
+	UpstreamTimeoutMs           int64  `json:"upstreamTimeoutMs"`
+	UpstreamStreamIdleTimeoutMs int64  `json:"upstreamStreamIdleTimeoutMs"`
 }
+
+const (
+	systemConfigGroupGateway               = "gateway"
+	systemConfigProxyPrefix                = "freeai.proxy-prefix"
+	systemConfigDefaultUpstreamBaseURL     = "freeai.default-upstream-base-url"
+	systemConfigRequestTimeoutSeconds      = "freeai.request-timeout-seconds"
+	systemConfigStreamIdleTimeoutSeconds   = "freeai.stream-idle-timeout-seconds"
+	systemConfigMaxRetries                 = "freeai.max-retries"
+	systemConfigRoutingStrategy            = "freeai.routing-strategy"
+	systemConfigQuotaRefreshSeconds        = "freeai.quota-refresh-seconds"
+	systemConfigCooldownSeconds            = "freeai.cooldown-seconds"
+	systemConfigCleanupLogRetentionDays    = "freeai.cleanup-log-retention-days"
+	systemConfigSecretKeyFile              = "freeai.secret-key-file"
+	systemConfigLogPromptContent           = "freeai.log-prompt-content"
+	systemConfigOpenAICallbackEnabled      = "freeai.openai-callback-enabled"
+	systemConfigOpenAICallbackAddr         = "freeai.openai-callback-addr"
+	systemConfigUpstreamProxyEnabled       = "freeai.upstream-proxy-enabled"
+	systemConfigUpstreamProxyURL           = "freeai.upstream-proxy-url"
+	systemConfigGatewayListenAddress       = "gateway.listen-address"
+	systemConfigGatewayAccountSelection    = "gateway.account-selection-strategy"
+	systemConfigGatewayFreeAccountModel    = "gateway.free-account-model"
+	systemConfigGatewayModelRewriteRules   = "gateway.model-rewrite-rules"
+	systemConfigGatewayOriginator          = "gateway.originator"
+	systemConfigGatewayResidency           = "gateway.residency"
+	systemConfigGatewaySSEKeepAliveMs      = "gateway.sse-keep-alive-ms"
+	systemConfigGatewayUpstreamTimeoutMs   = "gateway.upstream-timeout-ms"
+	systemConfigGatewayStreamIdleTimeoutMs = "gateway.upstream-stream-idle-timeout-ms"
+)
 
 func Config() FreeModelConfig {
 	m := map[string]any{}
@@ -51,7 +88,7 @@ func Config() FreeModelConfig {
 	if _, ok := m["openai-callback-enabled"]; ok {
 		openAICallbackEnabled = cast.ToBool(m["openai-callback-enabled"])
 	}
-	return FreeModelConfig{
+	cfg := FreeModelConfig{
 		ProxyPrefix:              stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
 		DefaultUpstreamBaseURL:   stringDefault(cast.ToString(m["default-upstream-base-url"]), "https://api.openai.com/v1"),
 		RequestTimeoutSeconds:    int64Default(cast.ToInt64(m["request-timeout-seconds"]), 120),
@@ -68,6 +105,26 @@ func Config() FreeModelConfig {
 		UpstreamProxyEnabled:     cast.ToBool(m["upstream-proxy-enabled"]),
 		UpstreamProxyURL:         strings.TrimSpace(cast.ToString(m["upstream-proxy-url"])),
 	}
+	applySystemConfigOverrides(&cfg)
+	return cfg
+}
+
+func applySystemConfigOverrides(cfg *FreeModelConfig) {
+	cfg.ProxyPrefix = SystemConfigServiceApp.GetString(systemConfigProxyPrefix, cfg.ProxyPrefix)
+	cfg.DefaultUpstreamBaseURL = SystemConfigServiceApp.GetString(systemConfigDefaultUpstreamBaseURL, cfg.DefaultUpstreamBaseURL)
+	cfg.RequestTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigRequestTimeoutSeconds, cfg.RequestTimeoutSeconds)
+	cfg.StreamIdleTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigStreamIdleTimeoutSeconds, cfg.StreamIdleTimeoutSeconds)
+	cfg.MaxRetries = SystemConfigServiceApp.GetInt(systemConfigMaxRetries, cfg.MaxRetries)
+	cfg.RoutingStrategy = SystemConfigServiceApp.GetString(systemConfigRoutingStrategy, cfg.RoutingStrategy)
+	cfg.QuotaRefreshSeconds = SystemConfigServiceApp.GetInt64(systemConfigQuotaRefreshSeconds, cfg.QuotaRefreshSeconds)
+	cfg.CooldownSeconds = SystemConfigServiceApp.GetInt64(systemConfigCooldownSeconds, cfg.CooldownSeconds)
+	cfg.CleanupLogRetentionDays = SystemConfigServiceApp.GetInt(systemConfigCleanupLogRetentionDays, cfg.CleanupLogRetentionDays)
+	cfg.SecretKeyFile = SystemConfigServiceApp.GetString(systemConfigSecretKeyFile, cfg.SecretKeyFile)
+	cfg.LogPromptContent = SystemConfigServiceApp.GetBool(systemConfigLogPromptContent, cfg.LogPromptContent)
+	cfg.OpenAICallbackEnabled = SystemConfigServiceApp.GetBool(systemConfigOpenAICallbackEnabled, cfg.OpenAICallbackEnabled)
+	cfg.OpenAICallbackAddr = SystemConfigServiceApp.GetString(systemConfigOpenAICallbackAddr, cfg.OpenAICallbackAddr)
+	cfg.UpstreamProxyEnabled = SystemConfigServiceApp.GetBool(systemConfigUpstreamProxyEnabled, cfg.UpstreamProxyEnabled)
+	cfg.UpstreamProxyURL = strings.TrimSpace(SystemConfigServiceApp.GetString(systemConfigUpstreamProxyURL, cfg.UpstreamProxyURL))
 }
 
 func (c FreeModelConfig) RequestTimeout() time.Duration {
@@ -98,8 +155,17 @@ func UpstreamHTTPClient() (*http.Client, error) {
 func GatewayProxyConfig() GatewayProxyConfigInput {
 	cfg := Config()
 	return GatewayProxyConfigInput{
-		UpstreamProxyEnabled: cfg.UpstreamProxyEnabled,
-		UpstreamProxyURL:     cfg.UpstreamProxyURL,
+		ListenAddress:               SystemConfigServiceApp.GetString(systemConfigGatewayListenAddress, "127.0.0.1"),
+		AccountSelectionStrategy:    SystemConfigServiceApp.GetString(systemConfigGatewayAccountSelection, "ordered"),
+		FreeAccountModel:            SystemConfigServiceApp.GetString(systemConfigGatewayFreeAccountModel, "follow_request"),
+		ModelRewriteRules:           SystemConfigServiceApp.GetString(systemConfigGatewayModelRewriteRules, "spark*=gpt-5.4-mini\nclaude-sonnet-4*=gpt-5.4"),
+		Originator:                  SystemConfigServiceApp.GetString(systemConfigGatewayOriginator, "codex_cli_rs"),
+		Residency:                   SystemConfigServiceApp.GetString(systemConfigGatewayResidency, ""),
+		UpstreamProxyEnabled:        cfg.UpstreamProxyEnabled,
+		UpstreamProxyURL:            cfg.UpstreamProxyURL,
+		SSEKeepAliveMs:              SystemConfigServiceApp.GetInt64(systemConfigGatewaySSEKeepAliveMs, 15000),
+		UpstreamTimeoutMs:           SystemConfigServiceApp.GetInt64(systemConfigGatewayUpstreamTimeoutMs, cfg.RequestTimeoutSeconds*1000),
+		UpstreamStreamIdleTimeoutMs: SystemConfigServiceApp.GetInt64(systemConfigGatewayStreamIdleTimeoutMs, cfg.StreamIdleTimeoutSeconds*1000),
 	}
 }
 
@@ -115,14 +181,50 @@ func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfig
 	}
 	global.Lock.Lock()
 	defer global.Lock.Unlock()
-	if global.NAV_VIPER != nil {
-		global.NAV_VIPER.Set("freeai.upstream-proxy-enabled", input.UpstreamProxyEnabled)
-		global.NAV_VIPER.Set("freeai.upstream-proxy-url", input.UpstreamProxyURL)
-		if err := global.NAV_VIPER.WriteConfig(); err != nil {
-			return GatewayProxyConfigInput{}, err
+	if err := SystemConfigServiceApp.SetBool(systemConfigGroupGateway, systemConfigUpstreamProxyEnabled, input.UpstreamProxyEnabled, "上游代理开关"); err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
+	if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, systemConfigUpstreamProxyURL, input.UpstreamProxyURL, "上游代理地址"); err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
+	if err := updateGatewayRuntimeConfig(input); err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
+	return GatewayProxyConfig(), nil
+}
+
+func updateGatewayRuntimeConfig(input GatewayProxyConfigInput) error {
+	values := []struct {
+		key    string
+		value  string
+		remark string
+	}{
+		{systemConfigGatewayListenAddress, normalizeListenAddress(input.ListenAddress), "网关监听地址"},
+		{systemConfigGatewayAccountSelection, stringDefault(strings.TrimSpace(input.AccountSelectionStrategy), "ordered"), "账号选择策略"},
+		{systemConfigGatewayFreeAccountModel, stringDefault(strings.TrimSpace(input.FreeAccountModel), "follow_request"), "Free 账号模型"},
+		{systemConfigGatewayModelRewriteRules, strings.TrimSpace(input.ModelRewriteRules), "模型转发规则"},
+		{systemConfigGatewayOriginator, stringDefault(strings.TrimSpace(input.Originator), "codex_cli_rs"), "上游 Originator"},
+		{systemConfigGatewayResidency, strings.TrimSpace(input.Residency), "区域驻留要求"},
+	}
+	for _, item := range values {
+		if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, item.key, item.value, item.remark); err != nil {
+			return err
 		}
 	}
-	return input, nil
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewaySSEKeepAliveMs, int64Default(input.SSEKeepAliveMs, 15000), "SSE 保活间隔"); err != nil {
+		return err
+	}
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游总超时"); err != nil {
+		return err
+	}
+	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayStreamIdleTimeoutMs, int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000), "上游流式空闲超时")
+}
+
+func normalizeListenAddress(value string) string {
+	if strings.TrimSpace(value) == "0.0.0.0" {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
 }
 
 func validateProxyURL(value string) error {

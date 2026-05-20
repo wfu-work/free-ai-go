@@ -84,7 +84,7 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 		EncryptedKey:       encryptedKey,
 		AllowedModels:      input.AllowedModels,
 		RoutingStrategy:    normalizePlatformKeyRoutingStrategy(input.RoutingStrategy),
-		AccountGroupFilter: normalizeAccountGroupName(input.AccountGroupFilter),
+		AccountGroupFilter: normalizePlatformKeyAccountGroupFilter(input.AccountGroupFilter),
 		TotalTokenLimit:    input.TotalTokenLimit,
 		TokenLimitUnit:     normalizeTokenLimitUnit(input.TokenLimitUnit),
 		ProtocolType:       normalizeProtocolType(input.ProtocolType),
@@ -159,7 +159,7 @@ func (s PlatformKeyService) Update(guid string, input CreatePlatformKeyInput) (d
 		"name":                  input.Name,
 		"allowed_models":        input.AllowedModels,
 		"routing_strategy":      normalizePlatformKeyRoutingStrategy(input.RoutingStrategy),
-		"account_group_filter":  normalizeAccountGroupName(input.AccountGroupFilter),
+		"account_group_filter":  normalizePlatformKeyAccountGroupFilter(input.AccountGroupFilter),
 		"total_token_limit":     input.TotalTokenLimit,
 		"token_limit_unit":      normalizeTokenLimitUnit(input.TokenLimitUnit),
 		"protocol_type":         normalizeProtocolType(input.ProtocolType),
@@ -411,6 +411,10 @@ func normalizePlatformKeyRoutingStrategy(value string) string {
 	default:
 		return "account_round_robin"
 	}
+}
+
+func normalizePlatformKeyAccountGroupFilter(value string) string {
+	return strings.TrimSpace(value)
 }
 
 func normalizeTokenLimitUnit(value string) string {

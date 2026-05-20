@@ -127,6 +127,7 @@ func (a OpsApi) Routes(c *gin.Context) {
 // @Success 200 {object} response.Response{data=[]object,msg=string}
 // @Router /ops/account-health [get]
 func (a OpsApi) AccountHealth(c *gin.Context) {
+	now := time.Now().UnixMilli()
 	var accounts []domains.Account
 	if err := global.NAV_DB.Order("provider asc, account_group asc, priority asc, id desc").Find(&accounts).Error; err != nil {
 		response.FailWithMessage(err.Error(), c)
@@ -150,6 +151,16 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 	items := make([]gin.H, 0, len(accounts))
 	for _, account := range accounts {
 		accountQuotas := quotaByAccount[account.Guid]
+		effectiveStatus := account.Status
+		if !account.Enabled {
+			effectiveStatus = domains.AccountStatusDisabled
+		} else {
+			if hasBlockingQuotaSnapshot(accountQuotas, now) {
+				effectiveStatus = domains.AccountStatusExhausted
+			} else if effectiveStatus == "" || effectiveStatus == domains.AccountStatusUnknown {
+				effectiveStatus = domains.AccountStatusAvailable
+			}
+		}
 		items = append(items, gin.H{
 			"guid":                  account.Guid,
 			"name":                  account.Name,
@@ -158,7 +169,7 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 			"usageQueryType":        account.UsageQueryType,
 			"usageApiUrl":           account.UsageAPIURL,
 			"accountGroup":          account.AccountGroup,
-			"status":                account.Status,
+			"status":                effectiveStatus,
 			"enabled":               account.Enabled,
 			"failureCount":          account.FailureCount,
 			"cooldownUntil":         account.CooldownUntil,
@@ -200,6 +211,24 @@ func supportsAccountUsageQuery(account domains.Account) bool {
 	values := []string{account.SupplierName, account.OfficialURL, account.APIBaseURL, account.UsageAPIURL}
 	for _, value := range values {
 		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), "codexzh") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
+	for _, quota := range quotas {
+		if quota.ResetAt > 0 && quota.ResetAt <= now {
+			continue
+		}
+		if quota.Status == domains.QuotaStatusExhausted {
+			return true
+		}
+		if quota.TotalAmount > 0 && (quota.RemainingAmount <= 0 || quota.UsedPercent >= services.QuotaExhaustedPercentThreshold) {
+			return true
+		}
+		if quota.TotalTokens > 0 && (quota.RemainingTokens <= 0 || quota.UsedPercent >= services.QuotaExhaustedPercentThreshold) {
 			return true
 		}
 	}

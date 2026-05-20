@@ -32,6 +32,8 @@ type QuotaInput struct {
 	Extra           string  `json:"extra"`
 }
 
+const QuotaExhaustedPercentThreshold = 99.5
+
 func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
 	if input.AccountGuid == "" {
 		return domains.AccountQuota{}, errors.New("accountGuid is required")
@@ -61,6 +63,9 @@ func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
 			"extra":            input.Extra,
 		}
 		err = global.NAV_DB.Model(&quota).Updates(updates).Error
+		if err == nil {
+			_ = global.NAV_DB.Where("account_guid = ? AND window_type = ?", input.AccountGuid, input.WindowType).First(&quota).Error
+		}
 		return quota, err
 	}
 	quota = domains.AccountQuota{
@@ -144,6 +149,25 @@ func (s QuotaService) ApplyQuotaError(accountGuid, errorType string) {
 	}
 }
 
+func (s QuotaService) HasBlockingQuota(accountGuid string) (bool, error) {
+	if accountGuid == "" {
+		return false, nil
+	}
+	now := time.Now().UnixMilli()
+	var count int64
+	err := global.NAV_DB.Model(&domains.AccountQuota{}).
+		Where("account_guid = ?", accountGuid).
+		Where("reset_at = 0 OR reset_at > ?", now).
+		Where(
+			"status = ? OR (total_amount > 0 AND (remaining_amount <= 0 OR used_percent >= ?)) OR (total_tokens > 0 AND (remaining_tokens <= 0 OR used_percent >= ?))",
+			domains.QuotaStatusExhausted,
+			QuotaExhaustedPercentThreshold,
+			QuotaExhaustedPercentThreshold,
+		).
+		Count(&count).Error
+	return count > 0, err
+}
+
 func (s QuotaService) ApplyUsage(accountGuid string, inputTokens, outputTokens int64) {
 	if accountGuid == "" || inputTokens+outputTokens <= 0 {
 		return
@@ -176,13 +200,31 @@ func (s QuotaService) ApplyUsage(accountGuid string, inputTokens, outputTokens i
 
 func (s QuotaService) RecoverCooldownAccounts() error {
 	now := time.Now().UnixMilli()
-	return global.NAV_DB.Model(&domains.Account{}).
+	var accounts []domains.Account
+	if err := global.NAV_DB.
 		Where("enabled = ? AND status IN ? AND cooldown_until > 0 AND cooldown_until <= ?", true, []string{domains.AccountStatusLimited, domains.AccountStatusCooldown}, now).
-		Updates(map[string]any{
+		Find(&accounts).Error; err != nil {
+		return err
+	}
+	for _, account := range accounts {
+		blocked, err := s.HasBlockingQuota(account.Guid)
+		if err != nil {
+			return err
+		}
+		updates := map[string]any{
 			"status":         domains.AccountStatusAvailable,
 			"cooldown_until": int64(0),
 			"failure_count":  0,
-		}).Error
+		}
+		if blocked {
+			updates["status"] = domains.AccountStatusExhausted
+			updates["failure_count"] = account.FailureCount
+		}
+		if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s QuotaService) RefreshExpiredWindows(accountGuid string) error {
@@ -195,6 +237,8 @@ func (s QuotaService) RefreshExpiredWindows(accountGuid string) error {
 	return query.Updates(map[string]any{
 		"used_percent":     float64(0),
 		"remaining_tokens": gorm.Expr("total_tokens"),
+		"used_amount":      float64(0),
+		"remaining_amount": gorm.Expr("total_amount"),
 		"status":           domains.QuotaStatusAvailable,
 		"reset_at":         int64(0),
 	}).Error
@@ -215,16 +259,6 @@ func normalizeQuotaInput(input QuotaInput) QuotaInput {
 		}
 		input.UsedPercent = float64(used) / float64(input.TotalTokens) * 100
 	}
-	if input.Status == "" {
-		switch {
-		case input.TotalAmount > 0 && input.RemainingAmount <= 0:
-			input.Status = domains.QuotaStatusExhausted
-		case input.TotalTokens > 0 && input.RemainingTokens == 0:
-			input.Status = domains.QuotaStatusExhausted
-		default:
-			input.Status = domains.QuotaStatusAvailable
-		}
-	}
 	if input.TotalAmount > 0 {
 		if input.RemainingAmount < 0 {
 			input.RemainingAmount = 0
@@ -236,6 +270,16 @@ func normalizeQuotaInput(input QuotaInput) QuotaInput {
 			input.UsedAmount = 0
 		}
 		input.UsedPercent = input.UsedAmount / input.TotalAmount * 100
+	}
+	if input.Status == "" {
+		switch {
+		case input.TotalAmount > 0 && (input.RemainingAmount <= 0 || input.UsedPercent >= QuotaExhaustedPercentThreshold):
+			input.Status = domains.QuotaStatusExhausted
+		case input.TotalTokens > 0 && (input.RemainingTokens <= 0 || input.UsedPercent >= QuotaExhaustedPercentThreshold):
+			input.Status = domains.QuotaStatusExhausted
+		default:
+			input.Status = domains.QuotaStatusAvailable
+		}
 	}
 	if input.ResetAt == 0 {
 		input.ResetAt = defaultQuotaResetAt(input.WindowType, now)

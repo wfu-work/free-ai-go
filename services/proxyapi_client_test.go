@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -52,5 +53,22 @@ func TestWriteChatCompletionChunk(t *testing.T) {
 	}
 	if !strings.Contains(out, `"content":"hi"`) {
 		t.Fatalf("chunk = %q", out)
+	}
+}
+
+func TestClassifyHTTPStatusPrefersQuotaExhaustedOverRateLimit(t *testing.T) {
+	got := classifyHTTPStatus(http.StatusTooManyRequests, []byte(`{"error":"insufficient quota"}`))
+	if got != "quota_exhausted" {
+		t.Fatalf("classifyHTTPStatus = %q", got)
+	}
+}
+
+func TestClassifyAPIErrorPrefersQuotaExhaustedOverRateLimit(t *testing.T) {
+	got := classifyAPIError(&proxydomains.APIError{
+		StatusCode: http.StatusTooManyRequests,
+		Message:    "quota is insufficient",
+	})
+	if got != "quota_exhausted" {
+		t.Fatalf("classifyAPIError = %q", got)
 	}
 }

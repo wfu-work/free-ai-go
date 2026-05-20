@@ -60,6 +60,7 @@ type AccountTestInput struct {
 }
 
 type FetchAccountModelsInput struct {
+	Guid       string `json:"guid"`
 	Provider   string `json:"provider"`
 	APIBaseURL string `json:"apiBaseUrl"`
 	AuthType   string `json:"authType"`
@@ -72,6 +73,12 @@ const (
 	openAIOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 	openAIOAuthDefaultScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 	codexZHAPIBaseURL       = "https://api.codexzh.com/v1"
+	freeModelAPIBaseURL     = "https://api.freemodel.dev"
+	aiokAPIBaseURL          = "https://aiok.club/v1"
+	tokeniAPIBaseURL        = "https://api.tokeni.top"
+	codexZHUsageAPIURL      = "https://codexzh.com/api/v1/usage/stats"
+	freeModelUsageAPIURL    = "https://freemodel.dev/api/usage"
+	tokeniUsageAPIURL       = "https://api.tokeni.top/v1/usage"
 )
 
 type LoginCallbackParseInput struct {
@@ -122,12 +129,21 @@ type CodexZHUsageStats struct {
 	SubscriptionEnd   string  `json:"subscriptionEnd"`
 }
 
+type TokeniUsageStats struct {
+	Balance float64 `json:"balance"`
+}
+
 type RefreshUsageResult struct {
 	AccountGuid string                 `json:"accountGuid"`
 	Provider    string                 `json:"provider"`
 	UsageType   string                 `json:"usageType"`
 	Quotas      []domains.AccountQuota `json:"quotas"`
-	Raw         CodexZHUsageStats      `json:"raw"`
+	Raw         any                    `json:"raw"`
+}
+
+type AccountListItem struct {
+	domains.Account
+	Quotas []domains.AccountQuota `json:"quotas"`
 }
 
 type UsageRefreshSweepResult struct {
@@ -276,14 +292,41 @@ func (s AccountService) List(params map[string]string) (list interface{}, total 
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	err = db.Order("priority asc, id desc").Limit(limit).Offset(offset).Find(&results).Error
-	return results, total, err
+	if err = db.Order("priority asc, id desc").Limit(limit).Offset(offset).Find(&results).Error; err != nil {
+		return nil, 0, err
+	}
+	items := attachAccountQuotas(results)
+	return items, total, nil
 }
 
 func (s AccountService) ListAll() ([]domains.Account, error) {
 	var list []domains.Account
 	err := global.NAV_DB.Order("priority asc, id desc").Find(&list).Error
 	return list, err
+}
+
+func attachAccountQuotas(accounts []domains.Account) []AccountListItem {
+	items := make([]AccountListItem, 0, len(accounts))
+	if len(accounts) == 0 {
+		return items
+	}
+	guids := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		guids = append(guids, account.Guid)
+	}
+	var quotas []domains.AccountQuota
+	_ = global.NAV_DB.Where("account_guid IN ?", guids).Order("window_type asc, id asc").Find(&quotas).Error
+	quotaByAccount := map[string][]domains.AccountQuota{}
+	for _, quota := range quotas {
+		quotaByAccount[quota.AccountGuid] = append(quotaByAccount[quota.AccountGuid], quota)
+	}
+	for _, account := range accounts {
+		items = append(items, AccountListItem{
+			Account: account,
+			Quotas:  quotaByAccount[account.Guid],
+		})
+	}
+	return items
 }
 
 func (s AccountService) DeleteByGuid(guid string) error {
@@ -310,7 +353,24 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
 		return domains.Account{}, err
 	}
-	if account.Enabled && (account.Status == "" || account.Status == domains.AccountStatusUnknown || account.Status == domains.AccountStatusLimited || account.Status == domains.AccountStatusCooldown) {
+	if supportsUsageQuery(account) {
+		if _, err := s.RefreshUsage(guid); err != nil {
+			_ = global.NAV_DB.Model(&account).Update("last_refreshed_at", now).Error
+			return domains.Account{}, err
+		}
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+		AuditServiceApp.Record("", "account.refresh", "account", guid, map[string]string{"mode": "usage"})
+		return s.GetByGuid(guid)
+	}
+	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
+	blocked, err := QuotaServiceApp.HasBlockingQuota(guid)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	if account.Enabled && blocked {
+		updates["status"] = domains.AccountStatusExhausted
+		updates["cooldown_until"] = int64(0)
+	} else if account.Enabled && (account.Status == "" || account.Status == domains.AccountStatusUnknown || account.Status == domains.AccountStatusLimited || account.Status == domains.AccountStatusCooldown) {
 		updates["status"] = domains.AccountStatusAvailable
 		updates["cooldown_until"] = int64(0)
 	}
@@ -319,7 +379,6 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 	}
 	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
 	AuditServiceApp.Record("", "account.refresh", "account", guid, nil)
-	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
 	return s.GetByGuid(guid)
 }
 
@@ -340,9 +399,20 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 		"enabled":     account.Enabled,
 		"modelCount":  len(parseSupportedModels(account.SupportedModels)),
 		"checkedAtMs": time.Now().UnixMilli(),
+		"mode":        "basic",
+		"message":     "Secret 解密成功，未填写模型，未发起上游请求",
 	}
 	if input.Model == "" {
-		return result, nil
+		if firstModel := firstSupportedModel(account.SupportedModels); firstModel != "" {
+			input.Model = firstModel
+			result["mode"] = "upstream"
+			result["message"] = "已使用账号支持的第一个模型发起上游测试"
+		} else {
+			return result, nil
+		}
+	} else {
+		result["mode"] = "upstream"
+		result["message"] = "已按指定模型发起上游测试"
 	}
 	model, err := ModelServiceApp.Find(input.Model)
 	if err != nil {
@@ -361,7 +431,7 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 			TimeoutSec:    int(Config().RequestTimeoutSeconds),
 		}
 	}
-	if model.Provider != account.Provider {
+	if model.Provider != "" && model.Provider != account.Provider {
 		return nil, errors.New("model provider does not match account provider")
 	}
 	prompt := input.Prompt
@@ -380,7 +450,7 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	proxyResult, err := ProxyAPIClientApp.Do(ctx, ProxyProviderConfig{
-		Name:    model.Provider,
+		Name:    firstNonEmpty(model.Provider, account.Provider),
 		BaseURL: accountBaseURL(account),
 		WireAPI: "responses",
 	}, ProxyCredential{Type: account.AuthType, Value: secret}, ProxyRequest{
@@ -394,6 +464,7 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 		result["upstreamErrorType"] = errorType
 		result["latencyMs"] = time.Since(startedAt).Milliseconds()
 		result["ok"] = false
+		result["message"] = "上游测试失败"
 		QuotaServiceApp.ApplyQuotaError(account.Guid, errorType)
 		if updated, markErr := s.MarkTestFailure(account.Guid, errorType); markErr == nil {
 			result["status"] = updated.Status
@@ -404,12 +475,16 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 	result["upstreamErrorType"] = proxyResult.ErrorType
 	result["latencyMs"] = proxyResult.LatencyMs
 	result["ok"] = proxyResult.StatusCode >= 200 && proxyResult.StatusCode < 300 && proxyResult.ErrorType == ""
+	result["model"] = model.PublicModel
+	result["upstreamModel"] = model.UpstreamModel
 	if proxyResult.ErrorType != "" {
+		result["message"] = "上游返回错误"
 		QuotaServiceApp.ApplyQuotaError(account.Guid, proxyResult.ErrorType)
 		if updated, markErr := s.MarkTestFailure(account.Guid, proxyResult.ErrorType); markErr == nil {
 			result["status"] = updated.Status
 		}
 	} else {
+		result["message"] = "上游测试通过"
 		_ = s.MarkUsed(account.Guid)
 		if updated, getErr := s.GetByGuid(account.Guid); getErr == nil {
 			result["status"] = updated.Status
@@ -420,19 +495,42 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 
 func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, error) {
 	secret := strings.TrimSpace(input.Secret)
+	var account domains.Account
 	if secret == "" {
-		return nil, errors.New("secret is required")
+		guid := strings.TrimSpace(input.Guid)
+		if guid == "" {
+			return nil, errors.New("secret is required")
+		}
+		if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
+			return nil, err
+		}
+		decrypted, err := s.DecryptSecret(account)
+		if err != nil {
+			return nil, err
+		}
+		secret = strings.TrimSpace(decrypted)
+		if secret == "" {
+			return nil, errors.New("secret is required")
+		}
 	}
 	authType := input.AuthType
 	if authType == "" {
-		authType = domains.AuthTypeBearerToken
+		authType = account.AuthType
+		if authType == "" {
+			authType = domains.AuthTypeBearerToken
+		}
 	}
 	baseURL := strings.TrimSpace(input.APIBaseURL)
 	if baseURL == "" {
-		if strings.TrimSpace(input.Provider) == "custom" {
+		if account.Guid != "" {
+			baseURL = accountBaseURL(account)
+		}
+		if baseURL == "" && strings.TrimSpace(input.Provider) == "custom" {
 			return nil, errors.New("apiBaseUrl is required for custom provider")
 		}
-		baseURL = providerDefaultAPIBaseURL(input.Provider)
+		if baseURL == "" {
+			baseURL = providerDefaultAPIBaseURL(input.Provider)
+		}
 	}
 	target := strings.TrimRight(baseURL, "/") + normalizeEndpoint("/v1/models", baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
@@ -612,9 +710,15 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	if err != nil {
 		return RefreshUsageResult{}, err
 	}
-	usageType := strings.TrimSpace(account.UsageQueryType)
+	usageType := normalizeUsageQueryType(account.UsageQueryType)
 	if usageType == "" && strings.EqualFold(account.Provider, "codexzh") {
 		usageType = "codexzh"
+	}
+	if usageType == "" && strings.EqualFold(account.Provider, "freemodel") {
+		usageType = "freemodel"
+	}
+	if usageType == "" && strings.EqualFold(account.Provider, "tokeni") {
+		usageType = "tokeni"
 	}
 	if usageType == "" && looksLikeCodexZHAccount(account) {
 		usageType = "codexzh"
@@ -622,6 +726,10 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	switch usageType {
 	case "codexzh":
 		return s.refreshCodexZHUsage(account)
+	case "freemodel":
+		return s.refreshFreeModelUsage(account)
+	case "tokeni":
+		return s.refreshTokeniUsage(account)
 	case "":
 		return RefreshUsageResult{}, errors.New("usage query is not configured")
 	default:
@@ -681,8 +789,14 @@ func (s AccountService) usageRefreshDue(accountGuid string, now int64) (bool, er
 }
 
 func supportsUsageQuery(account domains.Account) bool {
-	usageType := strings.TrimSpace(account.UsageQueryType)
+	usageType := normalizeUsageQueryType(account.UsageQueryType)
 	if usageType == "codexzh" || strings.EqualFold(account.Provider, "codexzh") {
+		return true
+	}
+	if usageType == "freemodel" || strings.EqualFold(account.Provider, "freemodel") {
+		return true
+	}
+	if usageType == "tokeni" || strings.EqualFold(account.Provider, "tokeni") {
 		return true
 	}
 	return usageType == "" && looksLikeCodexZHAccount(account)
@@ -713,6 +827,10 @@ func (s AccountService) refreshCodexZHUsage(account domains.Account) (RefreshUsa
 	}
 	if endMs := parseUsageTime(stats.SubscriptionEnd); endMs > 0 {
 		_ = global.NAV_DB.Model(&account).Update("subscription_expired_at", endMs).Error
+		account.SubscriptionExpiredAt = endMs
+	}
+	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
+		return RefreshUsageResult{}, err
 	}
 	return RefreshUsageResult{
 		AccountGuid: account.Guid,
@@ -721,6 +839,131 @@ func (s AccountService) refreshCodexZHUsage(account domains.Account) (RefreshUsa
 		Quotas:      quotas,
 		Raw:         stats,
 	}, nil
+}
+
+func (s AccountService) refreshFreeModelUsage(account domains.Account) (RefreshUsageResult, error) {
+	secret, err := s.DecryptSecret(account)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	stats, err := s.fetchFreeModelUsage(account, secret)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	quotas, err := s.upsertCodexZHQuotas(account, stats)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	if endMs := parseUsageTime(stats.SubscriptionEnd); endMs > 0 {
+		_ = global.NAV_DB.Model(&account).Update("subscription_expired_at", endMs).Error
+		account.SubscriptionExpiredAt = endMs
+	}
+	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
+		return RefreshUsageResult{}, err
+	}
+	return RefreshUsageResult{
+		AccountGuid: account.Guid,
+		Provider:    account.Provider,
+		UsageType:   "freemodel",
+		Quotas:      quotas,
+		Raw:         stats,
+	}, nil
+}
+
+func (s AccountService) refreshTokeniUsage(account domains.Account) (RefreshUsageResult, error) {
+	secret, err := s.DecryptSecret(account)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	stats, err := s.fetchTokeniUsage(account, secret)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	quotas, err := s.upsertTokeniQuota(account, stats)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
+		return RefreshUsageResult{}, err
+	}
+	return RefreshUsageResult{
+		AccountGuid: account.Guid,
+		Provider:    account.Provider,
+		UsageType:   "tokeni",
+		Quotas:      quotas,
+		Raw:         stats,
+	}, nil
+}
+
+func (s AccountService) fetchTokeniUsage(account domains.Account, secret string) (TokeniUsageStats, error) {
+	baseURL := strings.TrimSpace(account.UsageAPIURL)
+	if baseURL == "" {
+		baseURL = tokeniUsageAPIURL
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	if err != nil {
+		return TokeniUsageStats{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Accept", "application/json")
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return TokeniUsageStats{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return TokeniUsageStats{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return TokeniUsageStats{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return TokeniUsageStats{}, fmt.Errorf("fetch tokeni usage failed: upstream returned %d", resp.StatusCode)
+	}
+	stats, err := parseTokeniUsageResponse(body)
+	if err != nil {
+		return TokeniUsageStats{}, err
+	}
+	return stats, nil
+}
+
+func (s AccountService) fetchFreeModelUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
+	baseURL := strings.TrimSpace(account.UsageAPIURL)
+	if baseURL == "" {
+		baseURL = freeModelUsageAPIURL
+	}
+	reqURL := appendQueryParam(baseURL, "key", secret)
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return CodexZHUsageStats{}, fmt.Errorf("fetch freemodel usage failed: upstream returned %d", resp.StatusCode)
+	}
+	stats, err := parseCodexZHUsageResponse(body)
+	if err != nil {
+		return CodexZHUsageStats{}, err
+	}
+	return stats, nil
 }
 
 func (s AccountService) fetchCodexZHUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
@@ -805,6 +1048,32 @@ func (s AccountService) upsertCodexZHQuotas(account domains.Account, stats Codex
 	return quotas, nil
 }
 
+func (s AccountService) upsertTokeniQuota(account domains.Account, stats TokeniUsageStats) ([]domains.AccountQuota, error) {
+	now := time.Now().UnixMilli()
+	status := domains.QuotaStatusAvailable
+	if stats.Balance <= 0 {
+		status = domains.QuotaStatusExhausted
+	}
+	extra, _ := json.Marshal(map[string]any{
+		"balance": stats.Balance,
+	})
+	quota, err := QuotaServiceApp.Upsert(QuotaInput{
+		AccountGuid:     account.Guid,
+		WindowType:      "balance",
+		Unit:            "usd",
+		RemainingAmount: stats.Balance,
+		TotalAmount:     stats.Balance,
+		ResetAt:         0,
+		LastSyncedAt:    now,
+		Status:          status,
+		Extra:           string(extra),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []domains.AccountQuota{quota}, nil
+}
+
 func (s AccountService) Reorder(input ReorderAccountInput) error {
 	return global.NAV_DB.Transaction(func(tx *gorm.DB) error {
 		for _, item := range input.Items {
@@ -845,10 +1114,14 @@ func (s AccountService) SetEnabled(guid string, enabled bool) error {
 func (s AccountService) MarkUsed(guid string) error {
 	var account domains.Account
 	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
+	status := domains.AccountStatusAvailable
+	if blocked, err := QuotaServiceApp.HasBlockingQuota(guid); err == nil && blocked {
+		status = domains.AccountStatusExhausted
+	}
 	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
 		"last_used_at":  time.Now().UnixMilli(),
 		"failure_count": 0,
-		"status":        domains.AccountStatusAvailable,
+		"status":        status,
 	}).Error
 	if err == nil && account.Guid != "" {
 		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
@@ -927,6 +1200,59 @@ func (s AccountService) MarkExpiredSubscriptions() error {
 		Update("status", domains.AccountStatusExpired).Error
 }
 
+func (s AccountService) applyUsageRefreshStatus(account domains.Account, quotas []domains.AccountQuota) error {
+	if account.Guid == "" {
+		return nil
+	}
+	now := time.Now().UnixMilli()
+	status := account.Status
+	cooldownUntil := account.CooldownUntil
+	failureCount := account.FailureCount
+	switch {
+	case !account.Enabled:
+		status = domains.AccountStatusDisabled
+	case account.SubscriptionExpiredAt > 0 && account.SubscriptionExpiredAt <= now:
+		status = domains.AccountStatusExpired
+	case hasBlockingQuotaSnapshot(quotas, now):
+		status = domains.AccountStatusExhausted
+		cooldownUntil = 0
+	default:
+		if status == "" || status == domains.AccountStatusUnknown || status == domains.AccountStatusLimited || status == domains.AccountStatusCooldown || status == domains.AccountStatusExhausted {
+			status = domains.AccountStatusAvailable
+			cooldownUntil = 0
+			failureCount = 0
+		}
+	}
+	if err := global.NAV_DB.Model(&account).Updates(map[string]any{
+		"status":            status,
+		"cooldown_until":    cooldownUntil,
+		"failure_count":     failureCount,
+		"last_refreshed_at": now,
+	}).Error; err != nil {
+		return err
+	}
+	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	return nil
+}
+
+func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
+	for _, quota := range quotas {
+		if quota.ResetAt > 0 && quota.ResetAt <= now {
+			continue
+		}
+		if quota.Status == domains.QuotaStatusExhausted {
+			return true
+		}
+		if quota.TotalAmount > 0 && (quota.RemainingAmount <= 0 || quota.UsedPercent >= QuotaExhaustedPercentThreshold) {
+			return true
+		}
+		if quota.TotalTokens > 0 && (quota.RemainingTokens <= 0 || quota.UsedPercent >= QuotaExhaustedPercentThreshold) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s AccountService) DecryptSecret(account domains.Account) (string, error) {
 	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
 	return fmgutils.DecryptSecret(account.EncryptedSecret)
@@ -937,7 +1263,7 @@ func (s AccountService) FindAvailable(provider, accountGroup, model string, limi
 		limit = 100
 	}
 	now := time.Now().UnixMilli()
-	query := global.NAV_DB.Where("enabled = ? AND provider = ? AND status NOT IN ?", true, provider, []string{
+	query := global.NAV_DB.Where("enabled = ? AND status NOT IN ?", true, []string{
 		domains.AccountStatusDisabled,
 		domains.AccountStatusLimited,
 		domains.AccountStatusCooldown,
@@ -945,6 +1271,9 @@ func (s AccountService) FindAvailable(provider, accountGroup, model string, limi
 		domains.AccountStatusInvalid,
 		domains.AccountStatusExhausted,
 	})
+	if strings.TrimSpace(provider) != "" {
+		query = query.Where("provider = ?", strings.TrimSpace(provider))
+	}
 	query = query.Where("(cooldown_until = 0 OR cooldown_until < ?)", now)
 	query = query.Where("(subscription_expired_at = 0 OR subscription_expired_at > ?)", now)
 	if accountGroup != "" {
@@ -955,7 +1284,25 @@ func (s AccountService) FindAvailable(provider, accountGroup, model string, limi
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
-	return list, err
+	if err != nil {
+		return nil, err
+	}
+	available := make([]domains.Account, 0, len(list))
+	for _, account := range list {
+		blocked, err := QuotaServiceApp.HasBlockingQuota(account.Guid)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+				"status":         domains.AccountStatusExhausted,
+				"cooldown_until": int64(0),
+			}).Error
+			continue
+		}
+		available = append(available, account)
+	}
+	return available, nil
 }
 
 func parseSupportedModels(raw string) []string {
@@ -973,6 +1320,14 @@ func parseSupportedModels(raw string) []string {
 		}
 	}
 	return models
+}
+
+func firstSupportedModel(raw string) string {
+	models := parseSupportedModels(raw)
+	if len(models) == 0 {
+		return ""
+	}
+	return models[0]
 }
 
 func validateCustomProvider(provider, apiBaseURL, supplierName, officialURL string) error {
@@ -1003,20 +1358,42 @@ func providerDefaultAPIBaseURL(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codexzh":
 		return codexZHAPIBaseURL
+	case "freemodel":
+		return freeModelAPIBaseURL
+	case "aiok":
+		return aiokAPIBaseURL
+	case "tokeni":
+		return tokeniAPIBaseURL
 	default:
 		return Config().DefaultUpstreamBaseURL
 	}
 }
 
 func normalizeAccountUsageConfig(input *CreateAccountInput) {
-	input.UsageQueryType = strings.TrimSpace(input.UsageQueryType)
+	input.UsageQueryType = normalizeUsageQueryType(input.UsageQueryType)
 	input.UsageAPIURL = strings.TrimSpace(input.UsageAPIURL)
 	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "codexzh") {
 		input.UsageQueryType = "codexzh"
 	}
-	if input.UsageQueryType == "codexzh" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = "https://codexzh.com/api/v1/usage/stats"
+	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "freemodel") {
+		input.UsageQueryType = "freemodel"
 	}
+	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "tokeni") {
+		input.UsageQueryType = "tokeni"
+	}
+	if input.UsageQueryType == "codexzh" && input.UsageAPIURL == "" {
+		input.UsageAPIURL = codexZHUsageAPIURL
+	}
+	if input.UsageQueryType == "freemodel" && input.UsageAPIURL == "" {
+		input.UsageAPIURL = freeModelUsageAPIURL
+	}
+	if input.UsageQueryType == "tokeni" && input.UsageAPIURL == "" {
+		input.UsageAPIURL = tokeniUsageAPIURL
+	}
+}
+
+func normalizeUsageQueryType(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func accountBaseURL(account domains.Account) string {
@@ -1103,6 +1480,54 @@ func parseCodexZHUsageResponse(body []byte) (CodexZHUsageStats, error) {
 		return CodexZHUsageStats{}, errors.New("invalid codexzh usage response")
 	}
 	return wrapped.Data, nil
+}
+
+func parseTokeniUsageResponse(body []byte) (TokeniUsageStats, error) {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return TokeniUsageStats{}, err
+	}
+	balance, ok := findFirstNumber(payload, "balance")
+	if !ok {
+		return TokeniUsageStats{}, errors.New("invalid tokeni usage response")
+	}
+	return TokeniUsageStats{Balance: balance}, nil
+}
+
+func findFirstNumber(value any, keys ...string) (float64, bool) {
+	switch item := value.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if number, ok := numberFromAny(item[key]); ok {
+				return number, true
+			}
+		}
+		for _, child := range item {
+			if number, ok := findFirstNumber(child, keys...); ok {
+				return number, true
+			}
+		}
+	case []any:
+		for _, child := range item {
+			if number, ok := findFirstNumber(child, keys...); ok {
+				return number, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func numberFromAny(value any) (float64, bool) {
+	switch item := value.(type) {
+	case float64:
+		return item, true
+	case string:
+		if item = strings.TrimSpace(item); item != "" {
+			number, err := commonUtils.StringToFloat64(item)
+			return number, err == nil
+		}
+	}
+	return 0, false
 }
 
 func codexZHQuotaToUSD(value float64) float64 {

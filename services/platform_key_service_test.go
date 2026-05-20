@@ -28,3 +28,12 @@ func TestPlatformKeyModelMappingAllowed(t *testing.T) {
 		t.Fatal("unexpected model permission")
 	}
 }
+
+func TestNormalizePlatformKeyAccountGroupFilterKeepsEmpty(t *testing.T) {
+	if got := normalizePlatformKeyAccountGroupFilter(" "); got != "" {
+		t.Fatalf("expected empty account group filter, got %q", got)
+	}
+	if got := normalizePlatformKeyAccountGroupFilter(" default "); got != "default" {
+		t.Fatalf("expected explicit default account group filter, got %q", got)
+	}
+}

@@ -43,6 +43,7 @@ type CoreBackupData struct {
 	ModelMappings []domains.ModelMapping  `json:"modelMappings"`
 	PlatformKeys  []CoreBackupPlatformKey `json:"platformKeys"`
 	RouteStates   []domains.RouteState    `json:"routeStates"`
+	SystemConfigs []domains.SystemConfig  `json:"systemConfigs"`
 }
 
 type CoreBackupImportResult struct {
@@ -60,6 +61,8 @@ type CoreBackupImportResult struct {
 	FailedPlatformKeys  int      `json:"failedPlatformKeys"`
 	RouteStates         int      `json:"routeStates"`
 	FailedRouteStates   int      `json:"failedRouteStates"`
+	SystemConfigs       int      `json:"systemConfigs"`
+	FailedSystemConfigs int      `json:"failedSystemConfigs"`
 	GatewayConfig       int      `json:"gatewayConfig"`
 	FailedGatewayConfig int      `json:"failedGatewayConfig"`
 	Errors              []string `json:"errors,omitempty"`
@@ -104,6 +107,9 @@ func (s BackupService) ExportCore() (CoreBackupPayload, error) {
 		})
 	}
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.RouteStates).Error; err != nil {
+		return payload, err
+	}
+	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.SystemConfigs).Error; err != nil {
 		return payload, err
 	}
 	return payload, nil
@@ -162,6 +168,13 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 		}
 		result.RouteStates, result.FailedRouteStates = upsertByGuidSkipping(tx, routeStates, "路由状态", &result.Errors)
 
+		systemConfigs := make([]domains.SystemConfig, 0, len(payload.Data.SystemConfigs))
+		for _, item := range payload.Data.SystemConfigs {
+			item.Id = 0
+			systemConfigs = append(systemConfigs, item)
+		}
+		result.SystemConfigs, result.FailedSystemConfigs = upsertSystemConfigsSkipping(tx, systemConfigs, &result.Errors)
+
 		return nil
 	})
 	if err != nil {
@@ -173,9 +186,27 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 	} else {
 		result.GatewayConfig = 1
 	}
-	result.Success = result.AccountGroups + result.Accounts + result.AccountQuotas + result.ModelMappings + result.PlatformKeys + result.RouteStates + result.GatewayConfig
-	result.Failed = result.FailedAccountGroups + result.FailedAccounts + result.FailedAccountQuotas + result.FailedModelMappings + result.FailedPlatformKeys + result.FailedRouteStates + result.FailedGatewayConfig
+	result.Success = result.AccountGroups + result.Accounts + result.AccountQuotas + result.ModelMappings + result.PlatformKeys + result.RouteStates + result.SystemConfigs + result.GatewayConfig
+	result.Failed = result.FailedAccountGroups + result.FailedAccounts + result.FailedAccountQuotas + result.FailedModelMappings + result.FailedPlatformKeys + result.FailedRouteStates + result.FailedSystemConfigs + result.FailedGatewayConfig
 	return result, nil
+}
+
+func upsertSystemConfigsSkipping(tx *gorm.DB, items []domains.SystemConfig, errors *[]string) (int, int) {
+	success := 0
+	failed := 0
+	for index, item := range items {
+		err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "config_key"}},
+			UpdateAll: true,
+		}).Create(&item).Error
+		if err != nil {
+			failed++
+			appendImportError(errors, fmt.Sprintf("系统配置第%d条: %v", index+1, err))
+			continue
+		}
+		success++
+	}
+	return success, failed
 }
 
 func upsertByGuidSkipping[T any](tx *gorm.DB, items []T, label string, errors *[]string) (int, int) {

@@ -35,6 +35,38 @@ func (s AccountGroupService) Create(input AccountGroupInput) (domains.AccountGro
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
+	var existing domains.AccountGroup
+	err := global.NAV_DB.Unscoped().Where("name = ?", input.Name).First(&existing).Error
+	if err == nil {
+		if existing.DeletedTime.Valid {
+			updates := map[string]any{
+				"description":             strings.TrimSpace(input.Description),
+				"sort":                    input.Sort,
+				"enabled":                 enabled,
+				"remark":                  input.Remark,
+				"provider_summary":        "",
+				"account_type_summary":    "",
+				"model_summary":           "",
+				"account_count":           0,
+				"enabled_account_count":   0,
+				"available_account_count": 0,
+				"model_count":             0,
+				"enabled_model_count":     0,
+				"summary_synced_at":       int64(0),
+				"deleted_time":            nil,
+			}
+			if err := global.NAV_DB.Unscoped().Model(&existing).Updates(updates).Error; err != nil {
+				return domains.AccountGroup{}, err
+			}
+			_ = s.RefreshSummary(existing.Name)
+			AuditServiceApp.Record("", "account_group.restore", "account_group", existing.Guid, map[string]string{"name": existing.Name})
+			return s.GetByGuid(existing.Guid)
+		}
+		return domains.AccountGroup{}, errors.New("account group already exists")
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return domains.AccountGroup{}, err
+	}
 	entity := domains.AccountGroup{
 		Name:        input.Name,
 		Description: strings.TrimSpace(input.Description),
@@ -42,7 +74,7 @@ func (s AccountGroupService) Create(input AccountGroupInput) (domains.AccountGro
 		Enabled:     enabled,
 		Remark:      input.Remark,
 	}
-	err := global.NAV_DB.Create(&entity).Error
+	err = global.NAV_DB.Create(&entity).Error
 	if err == nil {
 		_ = s.RefreshSummary(entity.Name)
 	}
@@ -128,7 +160,7 @@ func (s AccountGroupService) DeleteByGuid(guid string) error {
 	if usedAccounts+usedModels > 0 {
 		return errors.New("account group is in use")
 	}
-	err := global.NAV_DB.Delete(&entity).Error
+	err := global.NAV_DB.Unscoped().Delete(&entity).Error
 	AuditServiceApp.Record("", "account_group.delete", "account_group", guid, map[string]string{"name": entity.Name})
 	return err
 }
