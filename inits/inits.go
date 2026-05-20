@@ -1,6 +1,7 @@
 package inits
 
 import (
+	"freeai/webs"
 	"os"
 
 	"freeai/domains"
@@ -39,6 +40,9 @@ func Init() {
 	})
 	sysInit.OnClearInit(func() []commonscheduleds.ClearDB {
 		return []commonscheduleds.ClearDB{}
+	})
+	sysInit.OnWebInit(func(router *gin.Engine) {
+		_ = webs.InitStatic(router)
 	})
 	sysInit.Init()
 }

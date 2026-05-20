@@ -21,6 +21,8 @@ logs
 # Editors
 .idea/
 .vscode/
+.cache/
 
 data/
 logback/
+bin/
