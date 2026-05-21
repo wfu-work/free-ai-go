@@ -17,6 +17,10 @@ import (
 
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
+	"github.com/wfu-work/proxy-api-lib/compat/aiok"
+	proxycodexzh "github.com/wfu-work/proxy-api-lib/compat/codexzh"
+	proxyfreemodel "github.com/wfu-work/proxy-api-lib/compat/freemodel"
+	proxytokeni "github.com/wfu-work/proxy-api-lib/compat/tokeni"
 	"gorm.io/gorm"
 )
 
@@ -72,13 +76,6 @@ const (
 	openAIOAuthRedirectURI  = "http://localhost:1455/auth/callback"
 	openAIOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 	openAIOAuthDefaultScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
-	codexZHAPIBaseURL       = "https://api.codexzh.com/v1"
-	freeModelAPIBaseURL     = "https://api.freemodel.dev"
-	aiokAPIBaseURL          = "https://aiok.club/v1"
-	tokeniAPIBaseURL        = "https://api.tokeni.top"
-	codexZHUsageAPIURL      = "https://codexzh.com/api/v1/usage/stats"
-	freeModelUsageAPIURL    = "https://freemodel.dev/api/usage"
-	tokeniUsageAPIURL       = "https://api.tokeni.top/v1/usage"
 )
 
 type LoginCallbackParseInput struct {
@@ -717,6 +714,9 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	if usageType == "" && strings.EqualFold(account.Provider, "freemodel") {
 		usageType = "freemodel"
 	}
+	if usageType == "" && strings.EqualFold(account.Provider, "aiok") {
+		usageType = "aiok"
+	}
 	if usageType == "" && strings.EqualFold(account.Provider, "tokeni") {
 		usageType = "tokeni"
 	}
@@ -728,6 +728,8 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 		return s.refreshCodexZHUsage(account)
 	case "freemodel":
 		return s.refreshFreeModelUsage(account)
+	case "aiok":
+		return s.refreshAiokUsage(account)
 	case "tokeni":
 		return s.refreshTokeniUsage(account)
 	case "":
@@ -794,6 +796,9 @@ func supportsUsageQuery(account domains.Account) bool {
 		return true
 	}
 	if usageType == "freemodel" || strings.EqualFold(account.Provider, "freemodel") {
+		return true
+	}
+	if usageType == "aiok" || strings.EqualFold(account.Provider, "aiok") {
 		return true
 	}
 	if usageType == "tokeni" || strings.EqualFold(account.Provider, "tokeni") {
@@ -870,6 +875,31 @@ func (s AccountService) refreshFreeModelUsage(account domains.Account) (RefreshU
 	}, nil
 }
 
+func (s AccountService) refreshAiokUsage(account domains.Account) (RefreshUsageResult, error) {
+	secret, err := s.DecryptSecret(account)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	stats, err := s.fetchAiokUsage(account, secret)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	quota, err := s.upsertAiokQuota(account, stats)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	if err := s.applyUsageRefreshStatus(account, quota); err != nil {
+		return RefreshUsageResult{}, err
+	}
+	return RefreshUsageResult{
+		AccountGuid: account.Guid,
+		Provider:    account.Provider,
+		UsageType:   "aiok",
+		Quotas:      quota,
+		Raw:         stats,
+	}, nil
+}
+
 func (s AccountService) refreshTokeniUsage(account domains.Account) (RefreshUsageResult, error) {
 	secret, err := s.DecryptSecret(account)
 	if err != nil {
@@ -898,107 +928,85 @@ func (s AccountService) refreshTokeniUsage(account domains.Account) (RefreshUsag
 func (s AccountService) fetchTokeniUsage(account domains.Account, secret string) (TokeniUsageStats, error) {
 	baseURL := strings.TrimSpace(account.UsageAPIURL)
 	if baseURL == "" {
-		baseURL = tokeniUsageAPIURL
+		baseURL = proxytokeni.UsageURL
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	httpClient, err := UpstreamHTTPClient()
 	if err != nil {
 		return TokeniUsageStats{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("Accept", "application/json")
-	client, err := UpstreamHTTPClient()
+	client := proxytokeni.NewUsageClient(
+		proxytokeni.WithUsageBaseURL(baseURL),
+		proxytokeni.WithUsageHTTPClient(httpClient),
+		proxytokeni.WithUsageTimeout(Config().RequestTimeout()),
+	)
+	stats, err := client.Fetch(context.Background(), secret)
 	if err != nil {
 		return TokeniUsageStats{}, err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return TokeniUsageStats{}, fmt.Errorf("fetch tokeni usage failed: upstream returned %d", resp.StatusCode)
-	}
-	stats, err := parseTokeniUsageResponse(body)
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	return stats, nil
+	return TokeniUsageStats{Balance: stats.Balance}, nil
 }
 
 func (s AccountService) fetchFreeModelUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
 	baseURL := strings.TrimSpace(account.UsageAPIURL)
 	if baseURL == "" {
-		baseURL = freeModelUsageAPIURL
+		baseURL = "https://freemodel.dev/api/usage"
 	}
-	reqURL := appendQueryParam(baseURL, "key", secret)
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	httpClient, err := UpstreamHTTPClient()
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}
-	client, err := UpstreamHTTPClient()
+	client := proxycodexzh.NewUsageClient(
+		proxycodexzh.WithUsageBaseURL(baseURL),
+		proxycodexzh.WithUsageHTTPClient(httpClient),
+		proxycodexzh.WithUsageTimeout(Config().RequestTimeout()),
+	)
+	stats, err := client.Fetch(context.Background(), secret)
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CodexZHUsageStats{}, fmt.Errorf("fetch freemodel usage failed: upstream returned %d", resp.StatusCode)
-	}
-	stats, err := parseCodexZHUsageResponse(body)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	return stats, nil
+	return CodexZHUsageStats(stats), nil
 }
 
 func (s AccountService) fetchCodexZHUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
 	baseURL := strings.TrimSpace(account.UsageAPIURL)
 	if baseURL == "" {
-		baseURL = "https://codexzh.com/api/v1/usage/stats"
+		baseURL = proxycodexzh.UsageURL
 	}
-	reqURL := appendQueryParam(baseURL, "key", secret)
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	httpClient, err := UpstreamHTTPClient()
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}
-	client, err := UpstreamHTTPClient()
+	client := proxycodexzh.NewUsageClient(
+		proxycodexzh.WithUsageBaseURL(baseURL),
+		proxycodexzh.WithUsageHTTPClient(httpClient),
+		proxycodexzh.WithUsageTimeout(Config().RequestTimeout()),
+	)
+	stats, err := client.Fetch(context.Background(), secret)
 	if err != nil {
 		return CodexZHUsageStats{}, err
 	}
-	resp, err := client.Do(req)
+	return CodexZHUsageStats(stats), nil
+}
+
+func (s AccountService) fetchAiokUsage(account domains.Account, secret string) (TokeniUsageStats, error) {
+	baseURL := strings.TrimSpace(account.UsageAPIURL)
+	if baseURL == "" {
+		baseURL = aiok.UsageURL
+	}
+	httpClient, err := UpstreamHTTPClient()
 	if err != nil {
-		return CodexZHUsageStats{}, err
+		return TokeniUsageStats{}, err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	client := aiok.NewUsageClient(
+		aiok.WithUsageBaseURL(baseURL),
+		aiok.WithUsageHTTPClient(httpClient),
+		aiok.WithUsageTimeout(Config().RequestTimeout()),
+	)
+	stats, err := client.Fetch(context.Background(), secret)
 	if err != nil {
-		return CodexZHUsageStats{}, err
+		return TokeniUsageStats{}, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return CodexZHUsageStats{}, fmt.Errorf("fetch usage failed: upstream returned %d", resp.StatusCode)
-	}
-	stats, err := parseCodexZHUsageResponse(body)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	return stats, nil
+	return TokeniUsageStats{Balance: stats.Balance}, nil
 }
 
 func (s AccountService) upsertCodexZHQuotas(account domains.Account, stats CodexZHUsageStats) ([]domains.AccountQuota, error) {
@@ -1072,6 +1080,10 @@ func (s AccountService) upsertTokeniQuota(account domains.Account, stats TokeniU
 		return nil, err
 	}
 	return []domains.AccountQuota{quota}, nil
+}
+
+func (s AccountService) upsertAiokQuota(account domains.Account, stats TokeniUsageStats) ([]domains.AccountQuota, error) {
+	return s.upsertTokeniQuota(account, stats)
 }
 
 func (s AccountService) Reorder(input ReorderAccountInput) error {
@@ -1357,13 +1369,13 @@ func normalizeAccountProviderConfig(input *CreateAccountInput) {
 func providerDefaultAPIBaseURL(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "codexzh":
-		return codexZHAPIBaseURL
+		return proxycodexzh.BaseURL
 	case "freemodel":
-		return freeModelAPIBaseURL
+		return proxyfreemodel.BaseURL
 	case "aiok":
-		return aiokAPIBaseURL
+		return aiok.BaseURL
 	case "tokeni":
-		return tokeniAPIBaseURL
+		return proxytokeni.BaseURL
 	default:
 		return Config().DefaultUpstreamBaseURL
 	}
@@ -1378,17 +1390,23 @@ func normalizeAccountUsageConfig(input *CreateAccountInput) {
 	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "freemodel") {
 		input.UsageQueryType = "freemodel"
 	}
+	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "aiok") {
+		input.UsageQueryType = "aiok"
+	}
 	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "tokeni") {
 		input.UsageQueryType = "tokeni"
 	}
 	if input.UsageQueryType == "codexzh" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = codexZHUsageAPIURL
+		input.UsageAPIURL = proxycodexzh.UsageURL
 	}
 	if input.UsageQueryType == "freemodel" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = freeModelUsageAPIURL
+		input.UsageAPIURL = "https://freemodel.dev/api/usage"
+	}
+	if input.UsageQueryType == "aiok" && input.UsageAPIURL == "" {
+		input.UsageAPIURL = aiok.UsageURL
 	}
 	if input.UsageQueryType == "tokeni" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = tokeniUsageAPIURL
+		input.UsageAPIURL = proxytokeni.UsageURL
 	}
 }
 
@@ -1432,21 +1450,6 @@ func parseModelListResponse(body []byte) []string {
 	return models
 }
 
-func appendQueryParam(rawURL, key, value string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		separator := "?"
-		if strings.Contains(rawURL, "?") {
-			separator = "&"
-		}
-		return rawURL + separator + url.QueryEscape(key) + "=" + url.QueryEscape(value)
-	}
-	query := parsed.Query()
-	query.Set(key, value)
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
 func collectValues(out map[string]string, values url.Values) {
 	for key, item := range values {
 		if len(item) > 0 && strings.TrimSpace(item[0]) != "" {
@@ -1465,73 +1468,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func parseCodexZHUsageResponse(body []byte) (CodexZHUsageStats, error) {
-	var direct CodexZHUsageStats
-	if err := json.Unmarshal(body, &direct); err == nil && (direct.DailyQuota > 0 || direct.WeeklyQuota > 0 || direct.TodayUsed > 0 || direct.WeekUsed > 0) {
-		return direct, nil
-	}
-	var wrapped struct {
-		Data CodexZHUsageStats `json:"data"`
-	}
-	if err := json.Unmarshal(body, &wrapped); err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	if wrapped.Data.DailyQuota == 0 && wrapped.Data.WeeklyQuota == 0 && wrapped.Data.TodayUsed == 0 && wrapped.Data.WeekUsed == 0 {
-		return CodexZHUsageStats{}, errors.New("invalid codexzh usage response")
-	}
-	return wrapped.Data, nil
-}
-
-func parseTokeniUsageResponse(body []byte) (TokeniUsageStats, error) {
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return TokeniUsageStats{}, err
-	}
-	balance, ok := findFirstNumber(payload, "balance")
-	if !ok {
-		return TokeniUsageStats{}, errors.New("invalid tokeni usage response")
-	}
-	return TokeniUsageStats{Balance: balance}, nil
-}
-
-func findFirstNumber(value any, keys ...string) (float64, bool) {
-	switch item := value.(type) {
-	case map[string]any:
-		for _, key := range keys {
-			if number, ok := numberFromAny(item[key]); ok {
-				return number, true
-			}
-		}
-		for _, child := range item {
-			if number, ok := findFirstNumber(child, keys...); ok {
-				return number, true
-			}
-		}
-	case []any:
-		for _, child := range item {
-			if number, ok := findFirstNumber(child, keys...); ok {
-				return number, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func numberFromAny(value any) (float64, bool) {
-	switch item := value.(type) {
-	case float64:
-		return item, true
-	case string:
-		if item = strings.TrimSpace(item); item != "" {
-			number, err := commonUtils.StringToFloat64(item)
-			return number, err == nil
-		}
-	}
-	return 0, false
-}
-
 func codexZHQuotaToUSD(value float64) float64 {
-	return value / 500000
+	return proxycodexzh.QuotaToUSD(value)
 }
 
 func parseUsageTime(value string) int64 {

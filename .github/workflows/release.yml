@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  APP: freeai
+  CGO_ENABLED: "0"
+  PLATFORMS: darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test
+        run: make test
+
+      - name: Build packages
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          rm -rf bin dist
+          mkdir -p dist
+
+          for platform in ${PLATFORMS}; do
+            os="${platform%/*}"
+            arch="${platform#*/}"
+            ext=""
+            archive_ext="tar.gz"
+
+            if [ "${os}" = "windows" ]; then
+              ext=".exe"
+              archive_ext="zip"
+            fi
+
+            package_name="${APP}_${RELEASE_TAG}_${os}_${arch}"
+            package_dir="dist/${package_name}"
+            binary_path="bin/${os}-${arch}/${APP}${ext}"
+
+            echo "building ${binary_path}"
+            GOOS="${os}" GOARCH="${arch}" make build
+
+            mkdir -p "${package_dir}"
+            cp "${binary_path}" "${package_dir}/"
+            cp config.yaml "${package_dir}/config.example.yaml"
+
+            if [ "${archive_ext}" = "zip" ]; then
+              (cd dist && zip -qr "${package_name}.zip" "${package_name}")
+            else
+              tar -czf "dist/${package_name}.tar.gz" -C dist "${package_name}"
+            fi
+
+            rm -rf "${package_dir}"
+          done
+
+          (cd dist && shasum -a 256 *.tar.gz *.zip > checksums.txt)
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" dist/* \
+              --title "${RELEASE_TAG}" \
+              --notes "Automated release for ${RELEASE_TAG}."
+          fi

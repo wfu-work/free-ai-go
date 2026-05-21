@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	proxydomains "github.com/free-model/proxy-api-lib/domains"
+	proxydomains "github.com/wfu-work/proxy-api-lib/domains"
 )
 
 func TestChatCompletionResponseConvertsResponsesText(t *testing.T) {

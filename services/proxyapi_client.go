@@ -11,12 +11,16 @@ import (
 	"strings"
 	"time"
 
-	proxyapi "github.com/free-model/proxy-api-lib"
-	"github.com/free-model/proxy-api-lib/auth"
-	"github.com/free-model/proxy-api-lib/compat/chatcompletions"
-	"github.com/free-model/proxy-api-lib/compat/cliproxyapi"
-	"github.com/free-model/proxy-api-lib/compatible"
-	proxydomains "github.com/free-model/proxy-api-lib/domains"
+	proxyapi "github.com/wfu-work/proxy-api-lib"
+	"github.com/wfu-work/proxy-api-lib/auth"
+	"github.com/wfu-work/proxy-api-lib/compat/aiok"
+	"github.com/wfu-work/proxy-api-lib/compat/chatcompletions"
+	"github.com/wfu-work/proxy-api-lib/compat/cliproxyapi"
+	"github.com/wfu-work/proxy-api-lib/compat/codexzh"
+	"github.com/wfu-work/proxy-api-lib/compat/freemodel"
+	"github.com/wfu-work/proxy-api-lib/compat/tokeni"
+	"github.com/wfu-work/proxy-api-lib/compatible"
+	proxydomains "github.com/wfu-work/proxy-api-lib/domains"
 )
 
 type ProxyProviderConfig struct {
@@ -58,11 +62,11 @@ type ProxyAPIClient interface {
 	Stream(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest, w io.Writer) (*ProxyResult, error)
 }
 
-type FreeModelProxyAPIClient struct{}
+type ProxyAPIClientImpl struct{}
 
-var ProxyAPIClientApp ProxyAPIClient = FreeModelProxyAPIClient{}
+var ProxyAPIClientApp ProxyAPIClient = ProxyAPIClientImpl{}
 
-func (FreeModelProxyAPIClient) Do(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest) (*ProxyResult, error) {
+func (ProxyAPIClientImpl) Do(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest) (*ProxyResult, error) {
 	if req.Endpoint == "/v1/embeddings" {
 		return rawForward(ctx, provider, credential, req)
 	}
@@ -91,7 +95,7 @@ func (FreeModelProxyAPIClient) Do(ctx context.Context, provider ProxyProviderCon
 	}, nil
 }
 
-func (FreeModelProxyAPIClient) Stream(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
+func (ProxyAPIClientImpl) Stream(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
 	start := time.Now()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
@@ -155,20 +159,52 @@ func (FreeModelProxyAPIClient) Stream(ctx context.Context, provider ProxyProvide
 }
 
 func newProxyClient(provider ProxyProviderConfig, credential ProxyCredential) *proxyapi.Client {
-	wireAPI := provider.WireAPI
-	if wireAPI == "" {
-		wireAPI = compatible.WireAPIResponses
-	}
-	httpClient, _ := UpstreamHTTPClient()
 	return proxyapi.NewClient(
-		proxyapi.WithProvider(compatible.OpenAIResponses(compatible.Config{
+		proxyapi.WithProvider(providerPreset(provider)),
+		proxyapi.WithCredential(proxyCredential(credential)),
+	)
+}
+
+func providerPreset(provider ProxyProviderConfig) *compatible.ResponsesProvider {
+	httpClient, _ := UpstreamHTTPClient()
+	baseURL := strings.TrimSpace(provider.BaseURL)
+	switch strings.ToLower(strings.TrimSpace(provider.Name)) {
+	case "codexzh":
+		opts := []codexzh.Option{codexzh.WithHTTPClient(httpClient)}
+		if baseURL != "" {
+			opts = append(opts, codexzh.WithBaseURL(baseURL))
+		}
+		return codexzh.New(opts...)
+	case "freemodel":
+		opts := []freemodel.Option{freemodel.WithHTTPClient(httpClient)}
+		if baseURL != "" {
+			opts = append(opts, freemodel.WithBaseURL(baseURL))
+		}
+		return freemodel.New(opts...)
+	case "aiok":
+		opts := []aiok.Option{aiok.WithHTTPClient(httpClient)}
+		if baseURL != "" {
+			opts = append(opts, aiok.WithBaseURL(baseURL))
+		}
+		return aiok.New(opts...)
+	case "tokeni":
+		opts := []tokeni.Option{tokeni.WithHTTPClient(httpClient)}
+		if baseURL != "" {
+			opts = append(opts, tokeni.WithBaseURL(baseURL))
+		}
+		return tokeni.New(opts...)
+	default:
+		wireAPI := provider.WireAPI
+		if wireAPI == "" {
+			wireAPI = compatible.WireAPIResponses
+		}
+		return compatible.OpenAIResponses(compatible.Config{
 			Name:       provider.Name,
 			BaseURL:    provider.BaseURL,
 			WireAPI:    wireAPI,
 			HTTPClient: httpClient,
-		})),
-		proxyapi.WithCredential(proxyCredential(credential)),
-	)
+		})
+	}
 }
 
 func proxyCredential(credential ProxyCredential) proxydomains.Credential {
@@ -180,23 +216,6 @@ func proxyCredential(credential ProxyCredential) proxydomains.Credential {
 	default:
 		return auth.BearerToken(credential.Value)
 	}
-}
-
-func loginCallbackAccessToken(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return value
-	}
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(value), &payload); err == nil {
-		if token := strings.TrimSpace(payload["access_token"]); token != "" {
-			return token
-		}
-		if token := strings.TrimSpace(payload["token"]); token != "" {
-			return token
-		}
-	}
-	return value
 }
 
 func convertProxyRequest(req ProxyRequest) (proxydomains.ResponseRequest, error) {
@@ -489,4 +508,21 @@ func classifyHTTPStatus(status int, body []byte) string {
 		return "upstream_5xx"
 	}
 	return "network_error"
+}
+
+func loginCallbackAccessToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(value), &payload); err == nil {
+		if token := strings.TrimSpace(payload["access_token"]); token != "" {
+			return token
+		}
+		if token := strings.TrimSpace(payload["token"]); token != "" {
+			return token
+		}
+	}
+	return value
 }

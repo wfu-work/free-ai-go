@@ -2,15 +2,14 @@ module freeai
 
 go 1.26.0
 
-replace github.com/free-model/proxy-api-lib => ../proxy-api-lib
-
 require (
-	github.com/free-model/proxy-api-lib v0.0.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
+	github.com/pelletier/go-toml/v2 v2.3.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cast v1.10.0
 	github.com/wfu-work/nav-common-go-lib v0.0.0-20260410115433-425e7da57c9c
+	github.com/wfu-work/proxy-api-lib v0.0.0-20260520132833-30a82d34f7e4
 	go.uber.org/zap v1.27.1
 	gorm.io/gorm v1.31.1
 )
@@ -77,7 +76,6 @@ require (
 	github.com/mojocn/base64Captcha v1.3.8 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
-	github.com/pelletier/go-toml/v2 v2.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect

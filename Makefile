@@ -7,7 +7,7 @@ GOARCH ?= $(shell $(GO) env GOARCH)
 CGO_ENABLED ?=
 
 GO_PACKAGES := ./...
-GO_FILES := $(shell find . -name '*.go' -not -path './$(BIN_DIR)/*')
+GO_FILES := $(shell find . -path './.git' -prune -o -path './.cache' -prune -o -path './$(BIN_DIR)' -prune -o -name '*.go' -print)
 OS_ARCH := $(GOOS)-$(GOARCH)
 EXE_EXT := $(if $(filter windows,$(GOOS)),.exe,)
 TARGET_DIR := $(BIN_DIR)/$(OS_ARCH)
