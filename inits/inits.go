@@ -2,6 +2,7 @@ package inits
 
 import (
 	_ "embed"
+	"fmt"
 	"os"
 
 	"github.com/gin-gonic/gin"
