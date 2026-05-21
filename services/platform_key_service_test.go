@@ -3,7 +3,7 @@ package services
 import (
 	"testing"
 
-	"freeai/domains"
+	"github.com/wfu-work/free-ai-go/domains"
 )
 
 func TestPlatformKeyModelMappingAllowed(t *testing.T) {
