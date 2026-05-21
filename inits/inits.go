@@ -1,6 +1,7 @@
 package inits
 
 import (
+	_ "embed"
 	"os"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,7 @@ import (
 	"github.com/wfu-work/free-ai-go/routers"
 	"github.com/wfu-work/free-ai-go/scheduleds"
 	"github.com/wfu-work/free-ai-go/services"
+	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/free-ai-go/webs"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commoninits "github.com/wfu-work/nav-common-go-lib/inits"
@@ -16,7 +18,14 @@ import (
 	"go.uber.org/zap"
 )
 
+//go:embed config.yaml
+var defaultConfig []byte
+
 func Init() {
+	if err := utils.NewDefaultConfigManager(defaultConfig).Ensure(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "prepare config failed: %v\n", err)
+		os.Exit(1)
+	}
 	sysInit := commoninits.SysInit{}
 	sysInit.OnWebInit(func(router *gin.Engine) {
 		routers.RouterGroupApp.InitProxyWebRouter(router)
