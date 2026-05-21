@@ -3,10 +3,9 @@ package scheduleds
 import (
 	"fmt"
 
-	"freeai/services"
-	fmgutils "freeai/utils"
-
 	"github.com/robfig/cron/v3"
+	"github.com/wfu-work/free-ai-go/services"
+	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonscheduleds "github.com/wfu-work/nav-common-go-lib/scheduleds"
 	"go.uber.org/zap"
@@ -34,7 +33,7 @@ func Register(timers commonscheduleds.Timer, options []cron.Option) {
 		if err := services.AccountServiceApp.MarkExpiredSubscriptions(); err != nil {
 			global.NAV_LOG.Warn("mark expired subscriptions failed", zap.Error(err))
 		}
-		if status := fmgutils.CheckMasterKey(cfg.SecretKeyFile); !status.Loaded {
+		if status := utils.CheckMasterKey(cfg.SecretKeyFile); !status.Loaded {
 			global.NAV_LOG.Warn("master key check failed", zap.String("path", status.Path), zap.String("error", status.Error))
 		}
 	}, "recover-cooldown-accounts", options...)

@@ -9,9 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"freeai/domains"
-
 	"github.com/pelletier/go-toml/v2"
+	"github.com/wfu-work/free-ai-go/domains"
 )
 
 type CodexConfigService struct{}

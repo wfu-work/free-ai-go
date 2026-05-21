@@ -1,9 +1,8 @@
 package apis
 
 import (
-	"freeai/services"
-
 	"github.com/gin-gonic/gin"
+	"github.com/wfu-work/free-ai-go/services"
 	commonDomains "github.com/wfu-work/nav-common-go-lib/domains"
 	"github.com/wfu-work/nav-common-go-lib/utils"
 )

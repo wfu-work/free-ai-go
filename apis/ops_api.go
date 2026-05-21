@@ -3,13 +3,13 @@ package apis
 import (
 	"encoding/json"
 	"fmt"
-	"freeai/domains"
-	"freeai/services"
-	fmgutils "freeai/utils"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wfu-work/free-ai-go/domains"
+	"github.com/wfu-work/free-ai-go/services"
+	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	"github.com/wfu-work/nav-common-go-lib/response"
 )
@@ -245,7 +245,7 @@ func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
 // @Success 200 {object} response.Response{data=utils.MasterKeyStatus,msg=string}
 // @Router /ops/master-key [get]
 func (a OpsApi) MasterKey(c *gin.Context) {
-	response.Ok(fmgutils.CheckMasterKey(services.Config().SecretKeyFile), c)
+	response.Ok(utils.CheckMasterKey(services.Config().SecretKeyFile), c)
 }
 
 // ExportCoreBackup 导出核心数据备份

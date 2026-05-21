@@ -1,4 +1,4 @@
-module freeai
+module github.com/wfu-work/free-ai-go
 
 go 1.26.0
 

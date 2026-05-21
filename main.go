@@ -3,10 +3,10 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	"freeai/utils"
 	"os"
 
-	"freeai/inits"
+	"github.com/wfu-work/free-ai-go/inits"
+	"github.com/wfu-work/free-ai-go/utils"
 )
 
 //go:embed config.yaml

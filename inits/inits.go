@@ -1,16 +1,15 @@
 package inits
 
 import (
-	"freeai/webs"
 	"os"
-
-	"freeai/domains"
-	"freeai/routers"
-	fmgscheduleds "freeai/scheduleds"
-	"freeai/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
+	"github.com/wfu-work/free-ai-go/domains"
+	"github.com/wfu-work/free-ai-go/routers"
+	"github.com/wfu-work/free-ai-go/scheduleds"
+	"github.com/wfu-work/free-ai-go/services"
+	"github.com/wfu-work/free-ai-go/webs"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commoninits "github.com/wfu-work/nav-common-go-lib/inits"
 	commonscheduleds "github.com/wfu-work/nav-common-go-lib/scheduleds"
@@ -33,10 +32,10 @@ func Init() {
 	})
 	sysInit.OnOtherInit(func() {
 		services.StartOpenAIOAuthCallbackServer()
-		fmgscheduleds.Bootstrap()
+		scheduleds.Bootstrap()
 	})
 	sysInit.OnScheInit(func(timers commonscheduleds.Timer, options []cron.Option) {
-		fmgscheduleds.Register(timers, options)
+		scheduleds.Register(timers, options)
 	})
 	sysInit.OnClearInit(func() []commonscheduleds.ClearDB {
 		return []commonscheduleds.ClearDB{}

@@ -6,9 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"freeai/services"
-
 	"github.com/gin-gonic/gin"
+	"github.com/wfu-work/free-ai-go/services"
 )
 
 type ProxyApi struct{}

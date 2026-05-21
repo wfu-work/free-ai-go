@@ -1,9 +1,8 @@
 package routers
 
 import (
-	"freeai/apis"
-
 	"github.com/gin-gonic/gin"
+	"github.com/wfu-work/free-ai-go/apis"
 )
 
 var RouterGroupApp = new(RouterGroup)

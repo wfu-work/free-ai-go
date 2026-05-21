@@ -12,9 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"freeai/domains"
-	fmgutils "freeai/utils"
-
+	"github.com/wfu-work/free-ai-go/domains"
+	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"github.com/wfu-work/proxy-api-lib/compat/aiok"
@@ -171,8 +170,8 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 		input.Weight = 1
 	}
 	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
-	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
-	encrypted, err := fmgutils.EncryptSecret(input.Secret)
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	encrypted, err := utils.EncryptSecret(input.Secret)
 	if err != nil {
 		return domains.Account{}, err
 	}
@@ -188,7 +187,7 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 		AccountType:           input.AccountType,
 		AuthType:              input.AuthType,
 		EncryptedSecret:       encrypted,
-		SecretHint:            fmgutils.SecretHint(input.Secret),
+		SecretHint:            utils.SecretHint(input.Secret),
 		SupportedModels:       input.SupportedModels,
 		AccountGroup:          input.AccountGroup,
 		Status:                domains.AccountStatusAvailable,
@@ -236,13 +235,13 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 		"remark":                  input.Remark,
 	}
 	if input.Secret != "" {
-		fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
-		encrypted, err := fmgutils.EncryptSecret(input.Secret)
+		utils.SetSecretKeyFile(Config().SecretKeyFile)
+		encrypted, err := utils.EncryptSecret(input.Secret)
 		if err != nil {
 			return domains.Account{}, err
 		}
 		updates["encrypted_secret"] = encrypted
-		updates["secret_hint"] = fmgutils.SecretHint(input.Secret)
+		updates["secret_hint"] = utils.SecretHint(input.Secret)
 	}
 	if input.Weight <= 0 {
 		updates["weight"] = 1
@@ -633,7 +632,7 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 		Provider:       strings.TrimSpace(input.Provider),
 		AuthType:       domains.AuthTypeLoginCallback,
 		Secret:         secret,
-		SecretHint:     fmgutils.SecretHint(hintSource),
+		SecretHint:     utils.SecretHint(hintSource),
 		AccessToken:    accessToken,
 		Code:           code,
 		State:          state,
@@ -1266,8 +1265,8 @@ func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
 }
 
 func (s AccountService) DecryptSecret(account domains.Account) (string, error) {
-	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
-	return fmgutils.DecryptSecret(account.EncryptedSecret)
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	return utils.DecryptSecret(account.EncryptedSecret)
 }
 
 func (s AccountService) FindAvailable(provider, accountGroup, model string, limit int) ([]domains.Account, error) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"freeai/domains"
+	"github.com/wfu-work/free-ai-go/domains"
 )
 
 type ProxyService struct{}

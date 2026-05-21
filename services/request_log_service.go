@@ -3,9 +3,8 @@ package services
 import (
 	"time"
 
-	"freeai/domains"
-
 	"github.com/google/uuid"
+	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"

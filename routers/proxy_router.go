@@ -1,10 +1,10 @@
 package routers
 
 import (
-	"freeai/services"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/wfu-work/free-ai-go/services"
 )
 
 type ProxyRouter struct{}

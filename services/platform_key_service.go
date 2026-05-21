@@ -7,11 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"freeai/domains"
-	fmgutils "freeai/utils"
-
+	"github.com/wfu-work/free-ai-go/domains"
+	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
-	"github.com/wfu-work/nav-common-go-lib/utils"
+	commonutils "github.com/wfu-work/nav-common-go-lib/utils"
 	"gorm.io/gorm"
 )
 
@@ -67,19 +66,19 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 	if input.Name == "" {
 		return CreatePlatformKeyOutput{}, errors.New("name is required")
 	}
-	raw, err := fmgutils.RandomHex(24)
+	raw, err := utils.RandomHex(24)
 	if err != nil {
 		return CreatePlatformKeyOutput{}, err
 	}
 	key := "fmg_" + raw
-	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
-	encryptedKey, err := fmgutils.EncryptSecret(key)
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	encryptedKey, err := utils.EncryptSecret(key)
 	if err != nil {
 		return CreatePlatformKeyOutput{}, err
 	}
 	entity := domains.PlatformKey{
 		Name:               input.Name,
-		KeyHash:            fmgutils.SHA256Hex(key),
+		KeyHash:            utils.SHA256Hex(key),
 		KeyPrefix:          key[:10],
 		EncryptedKey:       encryptedKey,
 		AllowedModels:      input.AllowedModels,
@@ -102,8 +101,8 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 }
 
 func (s PlatformKeyService) List(params map[string]string) (list interface{}, total int64, err error) {
-	limit := utils.Str2Int(params["size"])
-	offset := utils.Str2Int(params["size"]) * (utils.Str2Int(params["page"]) - 1)
+	limit := commonutils.Str2Int(params["size"])
+	offset := commonutils.Str2Int(params["size"]) * (commonutils.Str2Int(params["page"]) - 1)
 	var results []domains.PlatformKey
 	db := global.NAV_DB
 	if params["enabled"] != "" {
@@ -213,7 +212,7 @@ func (s PlatformKeyService) Verify(header string) (domains.PlatformKey, error) {
 	if token == "" {
 		return domains.PlatformKey{}, errors.New(domains.ErrorPlatformKeyInvalid)
 	}
-	hash := fmgutils.SHA256Hex(token)
+	hash := utils.SHA256Hex(token)
 	var key domains.PlatformKey
 	err := global.NAV_DB.Where("key_hash = ? AND enabled = ?", hash, true).First(&key).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -356,8 +355,8 @@ func (s PlatformKeyService) DecryptKey(key domains.PlatformKey) string {
 	if strings.TrimSpace(key.EncryptedKey) == "" {
 		return ""
 	}
-	fmgutils.SetSecretKeyFile(Config().SecretKeyFile)
-	value, err := fmgutils.DecryptSecret(key.EncryptedKey)
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	value, err := utils.DecryptSecret(key.EncryptedKey)
 	if err != nil {
 		return ""
 	}
