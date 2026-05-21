@@ -299,4 +299,4 @@ make check
 
 ## License
 
-请以仓库中的 LICENSE 文件为准。如果当前仓库尚未添加 LICENSE，建议在公开发布前补充明确的开源协议。
+本项目基于 MIT License 开源，详见 [LICENSE](LICENSE)。

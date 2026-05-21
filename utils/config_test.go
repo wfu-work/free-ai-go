@@ -1,4 +1,4 @@
-package main
+package utils
 
 import (
 	"os"
@@ -20,8 +20,8 @@ func TestHasConfigArg(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hasConfigArg(tc.args); got != tc.want {
-				t.Fatalf("hasConfigArg(%v) = %v, want %v", tc.args, got, tc.want)
+			if got := HasConfigArg(tc.args); got != tc.want {
+				t.Fatalf("HasConfigArg(%v) = %v, want %v", tc.args, got, tc.want)
 			}
 		})
 	}
@@ -33,7 +33,7 @@ func TestSetDefaultConfigEnvRespectsExplicitEnv(t *testing.T) {
 	t.Cleanup(func() { os.Args = oldArgs })
 	os.Args = []string{"freeai"}
 
-	setDefaultConfigEnv("embedded.yaml")
+	NewDefaultConfigManager([]byte("system:\n  app-name: test\n")).SetDefaultConfigEnv("embedded.yaml")
 
 	if got := os.Getenv("NAV_CONFIG"); got != "custom.yaml" {
 		t.Fatalf("NAV_CONFIG = %q, want explicit env", got)
@@ -46,7 +46,7 @@ func TestSetDefaultConfigEnvRespectsConfigArg(t *testing.T) {
 	t.Cleanup(func() { os.Args = oldArgs })
 	os.Args = []string{"freeai", "-c", "custom.yaml"}
 
-	setDefaultConfigEnv("embedded.yaml")
+	NewDefaultConfigManager([]byte("system:\n  app-name: test\n")).SetDefaultConfigEnv("embedded.yaml")
 
 	if got := os.Getenv("NAV_CONFIG"); got != "" {
 		t.Fatalf("NAV_CONFIG = %q, want empty because -c is explicit", got)
@@ -73,7 +73,7 @@ func TestSetDefaultConfigEnvRespectsLocalConfig(t *testing.T) {
 		t.Fatalf("write local config: %v", err)
 	}
 
-	setDefaultConfigEnv("embedded.yaml")
+	NewDefaultConfigManager([]byte("system:\n  app-name: test\n")).SetDefaultConfigEnv("embedded.yaml")
 
 	if got := os.Getenv("NAV_CONFIG"); got != "" {
 		t.Fatalf("NAV_CONFIG = %q, want empty because local config exists", got)
