@@ -8,7 +8,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.3.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cast v1.10.0
-	github.com/wfu-work/nav-common-go-lib v0.0.0-20260410115433-425e7da57c9c
+	github.com/wfu-work/nav-common-go-lib v0.0.0-20260525160434-bb3f44c0b557
 	github.com/wfu-work/proxy-api-lib v0.0.0-20260520132833-30a82d34f7e4
 	go.uber.org/zap v1.27.1
 	gorm.io/gorm v1.31.1

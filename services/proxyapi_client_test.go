@@ -72,3 +72,17 @@ func TestClassifyAPIErrorPrefersQuotaExhaustedOverRateLimit(t *testing.T) {
 		t.Fatalf("classifyAPIError = %q", got)
 	}
 }
+
+func TestLoginCallbackAccessTokenPrefersAPIKeyAccessToken(t *testing.T) {
+	got := loginCallbackAccessToken(`{"api_key_access_token":"api-key-token","access_token":"oauth-token"}`)
+	if got != "api-key-token" {
+		t.Fatalf("loginCallbackAccessToken = %q", got)
+	}
+}
+
+func TestLoginCallbackAccessTokenFallsBackToOAuthAccessToken(t *testing.T) {
+	got := loginCallbackAccessToken(`{"access_token":"oauth-token"}`)
+	if got != "oauth-token" {
+		t.Fatalf("loginCallbackAccessToken = %q", got)
+	}
+}

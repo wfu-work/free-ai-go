@@ -75,6 +75,7 @@ const (
 	openAIOAuthRedirectURI  = "http://localhost:1455/auth/callback"
 	openAIOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 	openAIOAuthDefaultScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+	openAIOAuthAPIKeyToken  = "openai-api-key"
 )
 
 type LoginCallbackParseInput struct {
@@ -90,6 +91,7 @@ type LoginCallbackParseResult struct {
 	Secret         string            `json:"secret"`
 	SecretHint     string            `json:"secretHint"`
 	AccessToken    string            `json:"accessToken,omitempty"`
+	APIKeyToken    string            `json:"apiKeyToken,omitempty"`
 	Code           string            `json:"code,omitempty"`
 	State          string            `json:"state,omitempty"`
 	CodeVerifier   string            `json:"codeVerifier,omitempty"`
@@ -99,7 +101,9 @@ type LoginCallbackParseResult struct {
 	ExpiresIn      string            `json:"expiresIn,omitempty"`
 	Scope          string            `json:"scope,omitempty"`
 	ExchangeError  string            `json:"exchangeError,omitempty"`
+	APIKeyError    string            `json:"apiKeyError,omitempty"`
 	HasAccessToken bool              `json:"hasAccessToken"`
+	HasAPIKeyToken bool              `json:"hasApiKeyToken"`
 	Params         map[string]string `json:"params"`
 }
 
@@ -110,6 +114,13 @@ type openAIOAuthTokenResponse struct {
 	TokenType    string `json:"token_type"`
 	ExpiresIn    any    `json:"expires_in"`
 	Scope        string `json:"scope"`
+}
+
+type openAIOAuthAPIKeyTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   any    `json:"expires_in"`
+	Scope       string `json:"scope"`
 }
 
 type CodexZHUsageStats struct {
@@ -591,7 +602,9 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 	codeVerifier := strings.TrimSpace(input.CodeVerifier)
 	refreshToken := ""
 	idToken := ""
+	apiKeyToken := ""
 	exchangeError := ""
+	apiKeyError := ""
 	if accessToken == "" && code != "" {
 		if codeVerifier == "" {
 			exchangeError = "missing code_verifier"
@@ -609,18 +622,27 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 			}
 		}
 	}
+	if idToken != "" {
+		apiKeyResp, err := exchangeOpenAIOAuthAPIKeyToken(idToken)
+		if err != nil {
+			apiKeyError = err.Error()
+		} else {
+			apiKeyToken = strings.TrimSpace(apiKeyResp.AccessToken)
+		}
+	}
 	secretPayload := map[string]string{
-		"provider":      strings.TrimSpace(input.Provider),
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-		"id_token":      idToken,
-		"code":          code,
-		"state":         state,
-		"code_verifier": codeVerifier,
-		"token_type":    tokenType,
-		"expires_in":    expiresIn,
-		"scope":         scope,
-		"callback_url":  rawURL,
+		"provider":             strings.TrimSpace(input.Provider),
+		"access_token":         accessToken,
+		"api_key_access_token": apiKeyToken,
+		"refresh_token":        refreshToken,
+		"id_token":             idToken,
+		"code":                 code,
+		"state":                state,
+		"code_verifier":        codeVerifier,
+		"token_type":           tokenType,
+		"expires_in":           expiresIn,
+		"scope":                scope,
+		"callback_url":         rawURL,
 	}
 	secretRaw, err := json.Marshal(secretPayload)
 	if err != nil {
@@ -634,6 +656,7 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 		Secret:         secret,
 		SecretHint:     utils.SecretHint(hintSource),
 		AccessToken:    accessToken,
+		APIKeyToken:    apiKeyToken,
 		Code:           code,
 		State:          state,
 		CodeVerifier:   codeVerifier,
@@ -643,7 +666,9 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 		ExpiresIn:      expiresIn,
 		Scope:          scope,
 		ExchangeError:  exchangeError,
+		APIKeyError:    apiKeyError,
 		HasAccessToken: accessToken != "",
+		HasAPIKeyToken: apiKeyToken != "",
 		Params:         params,
 	}, nil
 }
@@ -690,6 +715,48 @@ func exchangeOpenAIOAuthCode(code, codeVerifier, redirectURI string) (openAIOAut
 	}
 	if strings.TrimSpace(tokenResp.AccessToken) == "" {
 		return openAIOAuthTokenResponse{}, errors.New("oauth token exchange returned empty access_token")
+	}
+	return tokenResp, nil
+}
+
+func exchangeOpenAIOAuthAPIKeyToken(idToken string) (openAIOAuthAPIKeyTokenResponse, error) {
+	form := url.Values{}
+	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+	form.Set("client_id", openAIOAuthClientID)
+	form.Set("requested_token", openAIOAuthAPIKeyToken)
+	form.Set("subject_token", strings.TrimSpace(idToken))
+	form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:id_token")
+
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIOAuthTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return openAIOAuthAPIKeyTokenResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	client, err := UpstreamHTTPClient()
+	if err != nil {
+		return openAIOAuthAPIKeyTokenResponse{}, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return openAIOAuthAPIKeyTokenResponse{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openAIOAuthAPIKeyTokenResponse{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return openAIOAuthAPIKeyTokenResponse{}, fmt.Errorf("oauth api key token exchange failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tokenResp openAIOAuthAPIKeyTokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return openAIOAuthAPIKeyTokenResponse{}, err
+	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return openAIOAuthAPIKeyTokenResponse{}, errors.New("oauth api key token exchange returned empty access_token")
 	}
 	return tokenResp, nil
 }

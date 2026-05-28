@@ -517,6 +517,15 @@ func loginCallbackAccessToken(value string) string {
 	}
 	var payload map[string]string
 	if err := json.Unmarshal([]byte(value), &payload); err == nil {
+		if token := strings.TrimSpace(payload["api_key_access_token"]); token != "" {
+			return token
+		}
+		if token := strings.TrimSpace(payload["apiKeyAccessToken"]); token != "" {
+			return token
+		}
+		if token := strings.TrimSpace(payload["api_key_token"]); token != "" {
+			return token
+		}
 		if token := strings.TrimSpace(payload["access_token"]); token != "" {
 			return token
 		}
