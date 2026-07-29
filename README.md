@@ -1,6 +1,6 @@
 # FreeAiGo
 
-FreeAiGo 是一个基于 Go 的多账号 AI 代理网关，用于统一管理多个上游 AI 账号或 API Token，并对外提供 OpenAI-compatible API。
+FreeAiGo 是一个基于 Go 的 OpenAI 官方多账号代理网关，用于统一管理用户自己的 OpenAI Platform API Key 或应用层管理的登录令牌，并对外提供 OpenAI-compatible API。
 
 它适合在本地、内网或自托管环境中搭建一个轻量的 AI Token 池：统一鉴权、模型映射、账号路由、额度记录、请求日志和故障自动切换。
 
@@ -13,16 +13,16 @@ FreeAiGo 是一个基于 Go 的多账号 AI 代理网关，用于统一管理多
 - 自动路由：根据模型、账号状态、额度、权重和优先级选择可用账号
 - 失败切换：认证失败、限流、额度不足、网络错误等场景可自动切换账号
 - 流式响应：支持 SSE 转发，流式开始后不再切换账号，避免响应拼接错误
-- 额度管理：记录 Token、余额、窗口额度、刷新时间和账号健康状态
+- 用量管理：记录 Token 用量、本地窗口、刷新时间和账号健康状态
 - 请求日志：记录命中账号、上游模型、错误类型、延迟、Token 用量和切换原因
-- 上游适配：通过 [`github.com/wfu-work/proxy-api-lib`](https://github.com/wfu-work/proxy-api-lib) 处理 Responses、Chat Completions、Provider 预设、usage 查询和错误归一
+- 官方上游：通过 [`github.com/wfu-work/proxy-api-lib`](https://github.com/wfu-work/proxy-api-lib) 调用 OpenAI 官方 Responses、Embeddings 和 Models API，并处理 Chat Completions 转换、SSE 与错误归一
 
 ## 适用场景
 
-- 你有多个可合法使用的 AI API Key，希望统一路由和管理
+- 你有多个可合法使用的 OpenAI 官方账号或 API Key，希望统一路由和管理
 - 你需要给本地工具或团队成员提供一个稳定的 OpenAI-compatible Base URL
 - 你想隐藏真实上游 Token，只向客户端分发可控的平台密钥
-- 你希望在账号限流、余额不足或上游失败时自动切换备用账号
+- 你希望在账号限流、用量窗口耗尽或上游失败时自动切换备用账号
 - 你需要审计请求日志、账号状态、额度和用量
 
 ## 安全边界
@@ -74,7 +74,6 @@ sqlite:
 
 freeai:
   proxy-prefix: /v1
-  default-upstream-base-url: "https://api.openai.com/v1"
   request-timeout-seconds: 120
   stream-idle-timeout-seconds: 60
   max-retries: 1
@@ -127,11 +126,11 @@ curl http://127.0.0.1:48760/v1/chat/completions \
 
 ### 账号
 
-账号代表一个上游 AI Provider 的访问凭据，例如 OpenAI-compatible API Key、Bearer Token 或登录回调 Token。账号密钥会加密保存，只展示脱敏提示。
+账号代表 OpenAI 官方访问凭据，例如 Platform API Key、Bearer Token 或由应用管理的登录回调 Token。账号密钥会加密保存，只展示脱敏提示。
 
 账号支持：
 
-- Provider 和 Base URL
+- 固定 Provider `openai` 和官方 Base URL `https://api.openai.com/v1`
 - 认证类型
 - 支持模型列表
 - 分组、优先级、权重
@@ -156,7 +155,7 @@ curl http://127.0.0.1:48760/v1/chat/completions \
 
 模型映射用于将客户端请求的公开模型名映射到真实上游模型。
 
-例如客户端请求 `gpt-4.1`，FreeAiGo 可以根据配置路由到某个 Provider、账号组和具体上游模型。
+例如客户端请求 `gpt-4.1`，FreeAiGo 可以根据配置路由到某个 OpenAI 账号组和具体官方上游模型。
 
 ### 路由与切换
 
@@ -255,13 +254,11 @@ FreeAiGo 负责业务编排：
 - 请求日志
 - 自动切换
 
-`proxy-api-lib` 负责协议和 Provider 细节：
+`proxy-api-lib` 负责 OpenAI 官方协议细节：
 
-- OpenAI-compatible Responses 调用
+- OpenAI 官方 Responses、Embeddings 和 Models 调用
 - Chat Completions 到 Responses 的兼容转换
 - SSE 流式事件处理
-- Provider 预设
-- Usage 查询
 - 上游错误归一
 
 这样可以让 FreeAiGo 专注于网关和账号池逻辑，避免在应用层重复实现协议细节。

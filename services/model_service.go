@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/wfu-work/free-ai-go/domains"
@@ -28,7 +29,11 @@ type ModelInput struct {
 func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
 	input.PublicModel = strings.TrimSpace(input.PublicModel)
 	input.UpstreamModel = strings.TrimSpace(input.UpstreamModel)
-	input.Provider = strings.TrimSpace(input.Provider)
+	var err error
+	input.Provider, err = normalizeOfficialModelProvider(input.Provider)
+	if err != nil {
+		return domains.ModelMapping{}, err
+	}
 	input.Aliases = strings.TrimSpace(input.Aliases)
 	if input.PublicModel == "" || input.UpstreamModel == "" {
 		return domains.ModelMapping{}, errors.New("publicModel and upstreamModel are required")
@@ -47,7 +52,7 @@ func (s ModelService) Create(input ModelInput) (domains.ModelMapping, error) {
 		TimeoutSec:    input.TimeoutSec,
 		Enabled:       true,
 	}
-	err := global.NAV_DB.Create(&entity).Error
+	err = global.NAV_DB.Create(&entity).Error
 	if err == nil {
 		AccountGroupServiceApp.RefreshSummaries(entity.AccountGroup)
 	}
@@ -62,7 +67,11 @@ func (s ModelService) Update(guid string, input ModelInput) (domains.ModelMappin
 	}
 	input.PublicModel = strings.TrimSpace(input.PublicModel)
 	input.UpstreamModel = strings.TrimSpace(input.UpstreamModel)
-	input.Provider = strings.TrimSpace(input.Provider)
+	provider, err := normalizeOfficialModelProvider(input.Provider)
+	if err != nil {
+		return domains.ModelMapping{}, err
+	}
+	input.Provider = provider
 	input.Aliases = strings.TrimSpace(input.Aliases)
 	if input.PublicModel == "" || input.UpstreamModel == "" {
 		return domains.ModelMapping{}, errors.New("publicModel and upstreamModel are required")
@@ -130,16 +139,16 @@ func (s ModelService) ListAll() ([]domains.ModelMapping, error) {
 
 func (s ModelService) ListEnabled() ([]domains.ModelMapping, error) {
 	var list []domains.ModelMapping
-	err := global.NAV_DB.Where("enabled = ?", true).Order("public_model asc").Find(&list).Error
+	err := global.NAV_DB.Where("enabled = ? AND provider = ?", true, "openai").Order("public_model asc").Find(&list).Error
 	return list, err
 }
 
 func (s ModelService) Find(publicModel string) (domains.ModelMapping, error) {
 	var model domains.ModelMapping
-	err := global.NAV_DB.Where("public_model = ? AND enabled = ?", publicModel, true).First(&model).Error
+	err := global.NAV_DB.Where("public_model = ? AND enabled = ? AND provider = ?", publicModel, true, "openai").First(&model).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		var candidates []domains.ModelMapping
-		if listErr := global.NAV_DB.Where("enabled = ? AND aliases <> ?", true, "").Find(&candidates).Error; listErr != nil {
+		if listErr := global.NAV_DB.Where("enabled = ? AND provider = ? AND aliases <> ?", true, "openai", "").Find(&candidates).Error; listErr != nil {
 			return domains.ModelMapping{}, listErr
 		}
 		for _, candidate := range candidates {
@@ -209,6 +218,17 @@ func normalizeAliases(values []string) []string {
 
 func normalizeModelAccountGroup(value string) string {
 	return strings.TrimSpace(value)
+}
+
+func normalizeOfficialModelProvider(value string) (string, error) {
+	provider := strings.ToLower(strings.TrimSpace(value))
+	if provider == "" {
+		return "openai", nil
+	}
+	if provider != "openai" {
+		return "", fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", value)
+	}
+	return provider, nil
 }
 
 func (s ModelService) Delete(guid string) error {

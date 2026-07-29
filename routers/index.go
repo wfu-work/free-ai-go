@@ -30,7 +30,7 @@ var (
 	proxyApi        = apis.ApiGroupApp.ProxyApi
 )
 
-func (r *RouterGroup) InitFreeModelRouters(publicGroup *gin.RouterGroup, privateGroup *gin.RouterGroup) {
+func (r *RouterGroup) InitGatewayRouters(publicGroup *gin.RouterGroup, privateGroup *gin.RouterGroup) {
 	r.InitHealthRouter(publicGroup)
 	r.InitAccountRouter(privateGroup)
 	r.InitAccountGroupRouter(privateGroup)

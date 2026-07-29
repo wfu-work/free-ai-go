@@ -16,10 +16,7 @@ import (
 	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
-	"github.com/wfu-work/proxy-api-lib/compat/aiok"
-	proxycodexzh "github.com/wfu-work/proxy-api-lib/compat/codexzh"
-	proxyfreemodel "github.com/wfu-work/proxy-api-lib/compat/freemodel"
-	proxytokeni "github.com/wfu-work/proxy-api-lib/compat/tokeni"
+	proxyapi "github.com/wfu-work/proxy-api-lib"
 	"gorm.io/gorm"
 )
 
@@ -123,23 +120,6 @@ type openAIOAuthAPIKeyTokenResponse struct {
 	Scope       string `json:"scope"`
 }
 
-type CodexZHUsageStats struct {
-	DailyQuota        float64 `json:"dailyQuota"`
-	WeeklyQuota       float64 `json:"weeklyQuota"`
-	TodayUsed         float64 `json:"todayUsed"`
-	WeekUsed          float64 `json:"weekUsed"`
-	TodayCalls        int64   `json:"todayCalls"`
-	TotalCalls        int64   `json:"totalCalls"`
-	RPM               int64   `json:"rpm"`
-	TPM               int64   `json:"tpm"`
-	SubscriptionStart string  `json:"subscriptionStart"`
-	SubscriptionEnd   string  `json:"subscriptionEnd"`
-}
-
-type TokeniUsageStats struct {
-	Balance float64 `json:"balance"`
-}
-
 type RefreshUsageResult struct {
 	AccountGuid string                 `json:"accountGuid"`
 	Provider    string                 `json:"provider"`
@@ -163,14 +143,11 @@ func (s AccountService) Create(input CreateAccountInput) (domains.Account, error
 	if input.Name == "" {
 		return domains.Account{}, errors.New("name is required")
 	}
-	if input.Provider == "" {
-		return domains.Account{}, errors.New("provider is required")
-	}
 	if input.Secret == "" {
 		return domains.Account{}, errors.New("secret is required")
 	}
 	normalizeAccountProviderConfig(&input)
-	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
+	if err := validateOfficialAccountProvider(input.Provider, input.APIBaseURL); err != nil {
 		return domains.Account{}, err
 	}
 	if input.AuthType == "" {
@@ -222,7 +199,7 @@ func (s AccountService) Update(guid string, input CreateAccountInput) (domains.A
 		return domains.Account{}, err
 	}
 	normalizeAccountProviderConfig(&input)
-	if err := validateCustomProvider(input.Provider, input.APIBaseURL, input.SupplierName, input.OfficialURL); err != nil {
+	if err := validateOfficialAccountProvider(input.Provider, input.APIBaseURL); err != nil {
 		return domains.Account{}, err
 	}
 	normalizeAccountUsageConfig(&input)
@@ -360,15 +337,6 @@ func (s AccountService) Refresh(guid string) (domains.Account, error) {
 	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
 		return domains.Account{}, err
 	}
-	if supportsUsageQuery(account) {
-		if _, err := s.RefreshUsage(guid); err != nil {
-			_ = global.NAV_DB.Model(&account).Update("last_refreshed_at", now).Error
-			return domains.Account{}, err
-		}
-		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-		AuditServiceApp.Record("", "account.refresh", "account", guid, map[string]string{"mode": "usage"})
-		return s.GetByGuid(guid)
-	}
 	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
 	blocked, err := QuotaServiceApp.HasBlockingQuota(guid)
 	if err != nil {
@@ -393,6 +361,9 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return nil, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(account.Provider), "openai") {
+		return nil, fmt.Errorf("account provider %q is no longer supported", account.Provider)
 	}
 	secret, err := s.DecryptSecret(account)
 	if err != nil {
@@ -457,9 +428,7 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	proxyResult, err := ProxyAPIClientApp.Do(ctx, ProxyProviderConfig{
-		Name:    firstNonEmpty(model.Provider, account.Provider),
-		BaseURL: accountBaseURL(account),
-		WireAPI: "responses",
+		Name: "openai",
 	}, ProxyCredential{Type: account.AuthType, Value: secret}, ProxyRequest{
 		Endpoint: "/v1/responses",
 		Model:    model.UpstreamModel,
@@ -501,6 +470,9 @@ func (s AccountService) Test(guid string, input AccountTestInput) (map[string]an
 }
 
 func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, error) {
+	if provider := strings.ToLower(strings.TrimSpace(input.Provider)); provider != "" && provider != "openai" {
+		return nil, fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", input.Provider)
+	}
 	secret := strings.TrimSpace(input.Secret)
 	var account domains.Account
 	if secret == "" {
@@ -510,6 +482,9 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 		}
 		if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
 			return nil, err
+		}
+		if !strings.EqualFold(strings.TrimSpace(account.Provider), "openai") {
+			return nil, fmt.Errorf("account provider %q is no longer supported", account.Provider)
 		}
 		decrypted, err := s.DecryptSecret(account)
 		if err != nil {
@@ -527,47 +502,22 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 			authType = domains.AuthTypeBearerToken
 		}
 	}
-	baseURL := strings.TrimSpace(input.APIBaseURL)
-	if baseURL == "" {
-		if account.Guid != "" {
-			baseURL = accountBaseURL(account)
-		}
-		if baseURL == "" && strings.TrimSpace(input.Provider) == "custom" {
-			return nil, errors.New("apiBaseUrl is required for custom provider")
-		}
-		if baseURL == "" {
-			baseURL = providerDefaultAPIBaseURL(input.Provider)
-		}
-	}
-	target := strings.TrimRight(baseURL, "/") + normalizeEndpoint("/v1/models", baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	client, err := newProxyClient(ProxyCredential{Type: authType, Value: secret})
 	if err != nil {
 		return nil, err
 	}
-	authHeader, err := proxyCredential(ProxyCredential{Type: authType, Value: secret}).AuthorizationHeader(ctx)
+	resp, err := client.Models.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", authHeader)
-	client, err := UpstreamHTTPClient()
-	if err != nil {
-		return nil, err
+	models := make([]string, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		if id := strings.TrimSpace(model.ID); id != "" {
+			models = append(models, id)
+		}
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fetch models failed: upstream returned %d", resp.StatusCode)
-	}
-	models := parseModelListResponse(body)
 	if len(models) == 0 {
 		return nil, errors.New("no models found in upstream response")
 	}
@@ -576,6 +526,13 @@ func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, er
 }
 
 func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (LoginCallbackParseResult, error) {
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider == "" {
+		provider = "openai"
+	}
+	if provider != "openai" {
+		return LoginCallbackParseResult{}, fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", input.Provider)
+	}
 	rawURL := strings.TrimSpace(input.CallbackURL)
 	if rawURL == "" {
 		return LoginCallbackParseResult{}, errors.New("callbackUrl is required")
@@ -631,7 +588,7 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 		}
 	}
 	secretPayload := map[string]string{
-		"provider":             strings.TrimSpace(input.Provider),
+		"provider":             provider,
 		"access_token":         accessToken,
 		"api_key_access_token": apiKeyToken,
 		"refresh_token":        refreshToken,
@@ -651,7 +608,7 @@ func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (Login
 	secret := string(secretRaw)
 	hintSource := firstNonEmpty(accessToken, code, state, rawURL)
 	return LoginCallbackParseResult{
-		Provider:       strings.TrimSpace(input.Provider),
+		Provider:       provider,
 		AuthType:       domains.AuthTypeLoginCallback,
 		Secret:         secret,
 		SecretHint:     utils.SecretHint(hintSource),
@@ -773,383 +730,14 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	if err != nil {
 		return RefreshUsageResult{}, err
 	}
-	usageType := normalizeUsageQueryType(account.UsageQueryType)
-	if usageType == "" && strings.EqualFold(account.Provider, "codexzh") {
-		usageType = "codexzh"
-	}
-	if usageType == "" && strings.EqualFold(account.Provider, "freemodel") {
-		usageType = "freemodel"
-	}
-	if usageType == "" && strings.EqualFold(account.Provider, "aiok") {
-		usageType = "aiok"
-	}
-	if usageType == "" && strings.EqualFold(account.Provider, "tokeni") {
-		usageType = "tokeni"
-	}
-	if usageType == "" && looksLikeCodexZHAccount(account) {
-		usageType = "codexzh"
-	}
-	switch usageType {
-	case "codexzh":
-		return s.refreshCodexZHUsage(account)
-	case "freemodel":
-		return s.refreshFreeModelUsage(account)
-	case "aiok":
-		return s.refreshAiokUsage(account)
-	case "tokeni":
-		return s.refreshTokeniUsage(account)
-	case "":
-		return RefreshUsageResult{}, errors.New("usage query is not configured")
-	default:
-		return RefreshUsageResult{}, fmt.Errorf("unsupported usage query type %s", usageType)
-	}
+	return RefreshUsageResult{
+		AccountGuid: account.Guid,
+		Provider:    "openai",
+	}, errors.New("official OpenAI balance query is not supported; usage is tracked locally")
 }
 
 func (s AccountService) RefreshDueUsageAccounts() (UsageRefreshSweepResult, error) {
-	now := time.Now().UnixMilli()
-	var accounts []domains.Account
-	if err := global.NAV_DB.Where("enabled = ?", true).Find(&accounts).Error; err != nil {
-		return UsageRefreshSweepResult{}, err
-	}
-	result := UsageRefreshSweepResult{}
-	failures := make([]string, 0)
-	for _, account := range accounts {
-		if !supportsUsageQuery(account) {
-			continue
-		}
-		due, err := s.usageRefreshDue(account.Guid, now)
-		if err != nil {
-			result.Failed++
-			failures = append(failures, fmt.Sprintf("%s: %v", account.Guid, err))
-			continue
-		}
-		if !due {
-			continue
-		}
-		result.Checked++
-		if _, err := s.RefreshUsage(account.Guid); err != nil {
-			result.Failed++
-			failures = append(failures, fmt.Sprintf("%s: %v", account.Guid, err))
-			continue
-		}
-		result.Updated++
-	}
-	if len(failures) > 0 {
-		return result, fmt.Errorf("refresh usage failed for %d account(s): %s", len(failures), strings.Join(failures, "; "))
-	}
-	return result, nil
-}
-
-func (s AccountService) usageRefreshDue(accountGuid string, now int64) (bool, error) {
-	var quotas []domains.AccountQuota
-	if err := global.NAV_DB.Where("account_guid = ?", accountGuid).Find(&quotas).Error; err != nil {
-		return false, err
-	}
-	if len(quotas) == 0 {
-		return true, nil
-	}
-	for _, quota := range quotas {
-		if quota.NextRefreshAt == 0 || quota.NextRefreshAt <= now {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func supportsUsageQuery(account domains.Account) bool {
-	usageType := normalizeUsageQueryType(account.UsageQueryType)
-	if usageType == "codexzh" || strings.EqualFold(account.Provider, "codexzh") {
-		return true
-	}
-	if usageType == "freemodel" || strings.EqualFold(account.Provider, "freemodel") {
-		return true
-	}
-	if usageType == "aiok" || strings.EqualFold(account.Provider, "aiok") {
-		return true
-	}
-	if usageType == "tokeni" || strings.EqualFold(account.Provider, "tokeni") {
-		return true
-	}
-	return usageType == "" && looksLikeCodexZHAccount(account)
-}
-
-func looksLikeCodexZHAccount(account domains.Account) bool {
-	values := []string{account.SupplierName, account.OfficialURL, account.APIBaseURL, account.UsageAPIURL}
-	for _, value := range values {
-		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), "codexzh") {
-			return true
-		}
-	}
-	return false
-}
-
-func (s AccountService) refreshCodexZHUsage(account domains.Account) (RefreshUsageResult, error) {
-	secret, err := s.DecryptSecret(account)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	stats, err := s.fetchCodexZHUsage(account, secret)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	quotas, err := s.upsertCodexZHQuotas(account, stats)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	if endMs := parseUsageTime(stats.SubscriptionEnd); endMs > 0 {
-		_ = global.NAV_DB.Model(&account).Update("subscription_expired_at", endMs).Error
-		account.SubscriptionExpiredAt = endMs
-	}
-	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
-		return RefreshUsageResult{}, err
-	}
-	return RefreshUsageResult{
-		AccountGuid: account.Guid,
-		Provider:    account.Provider,
-		UsageType:   "codexzh",
-		Quotas:      quotas,
-		Raw:         stats,
-	}, nil
-}
-
-func (s AccountService) refreshFreeModelUsage(account domains.Account) (RefreshUsageResult, error) {
-	secret, err := s.DecryptSecret(account)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	stats, err := s.fetchFreeModelUsage(account, secret)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	quotas, err := s.upsertCodexZHQuotas(account, stats)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	if endMs := parseUsageTime(stats.SubscriptionEnd); endMs > 0 {
-		_ = global.NAV_DB.Model(&account).Update("subscription_expired_at", endMs).Error
-		account.SubscriptionExpiredAt = endMs
-	}
-	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
-		return RefreshUsageResult{}, err
-	}
-	return RefreshUsageResult{
-		AccountGuid: account.Guid,
-		Provider:    account.Provider,
-		UsageType:   "freemodel",
-		Quotas:      quotas,
-		Raw:         stats,
-	}, nil
-}
-
-func (s AccountService) refreshAiokUsage(account domains.Account) (RefreshUsageResult, error) {
-	secret, err := s.DecryptSecret(account)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	stats, err := s.fetchAiokUsage(account, secret)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	quota, err := s.upsertAiokQuota(account, stats)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	if err := s.applyUsageRefreshStatus(account, quota); err != nil {
-		return RefreshUsageResult{}, err
-	}
-	return RefreshUsageResult{
-		AccountGuid: account.Guid,
-		Provider:    account.Provider,
-		UsageType:   "aiok",
-		Quotas:      quota,
-		Raw:         stats,
-	}, nil
-}
-
-func (s AccountService) refreshTokeniUsage(account domains.Account) (RefreshUsageResult, error) {
-	secret, err := s.DecryptSecret(account)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	stats, err := s.fetchTokeniUsage(account, secret)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	quotas, err := s.upsertTokeniQuota(account, stats)
-	if err != nil {
-		return RefreshUsageResult{}, err
-	}
-	if err := s.applyUsageRefreshStatus(account, quotas); err != nil {
-		return RefreshUsageResult{}, err
-	}
-	return RefreshUsageResult{
-		AccountGuid: account.Guid,
-		Provider:    account.Provider,
-		UsageType:   "tokeni",
-		Quotas:      quotas,
-		Raw:         stats,
-	}, nil
-}
-
-func (s AccountService) fetchTokeniUsage(account domains.Account, secret string) (TokeniUsageStats, error) {
-	baseURL := strings.TrimSpace(account.UsageAPIURL)
-	if baseURL == "" {
-		baseURL = proxytokeni.UsageURL
-	}
-	httpClient, err := UpstreamHTTPClient()
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	client := proxytokeni.NewUsageClient(
-		proxytokeni.WithUsageBaseURL(baseURL),
-		proxytokeni.WithUsageHTTPClient(httpClient),
-		proxytokeni.WithUsageTimeout(Config().RequestTimeout()),
-	)
-	stats, err := client.Fetch(context.Background(), secret)
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	return TokeniUsageStats{Balance: stats.Balance}, nil
-}
-
-func (s AccountService) fetchFreeModelUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
-	baseURL := strings.TrimSpace(account.UsageAPIURL)
-	if baseURL == "" {
-		baseURL = "https://freemodel.dev/api/usage"
-	}
-	httpClient, err := UpstreamHTTPClient()
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	client := proxycodexzh.NewUsageClient(
-		proxycodexzh.WithUsageBaseURL(baseURL),
-		proxycodexzh.WithUsageHTTPClient(httpClient),
-		proxycodexzh.WithUsageTimeout(Config().RequestTimeout()),
-	)
-	stats, err := client.Fetch(context.Background(), secret)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	return CodexZHUsageStats(stats), nil
-}
-
-func (s AccountService) fetchCodexZHUsage(account domains.Account, secret string) (CodexZHUsageStats, error) {
-	baseURL := strings.TrimSpace(account.UsageAPIURL)
-	if baseURL == "" {
-		baseURL = proxycodexzh.UsageURL
-	}
-	httpClient, err := UpstreamHTTPClient()
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	client := proxycodexzh.NewUsageClient(
-		proxycodexzh.WithUsageBaseURL(baseURL),
-		proxycodexzh.WithUsageHTTPClient(httpClient),
-		proxycodexzh.WithUsageTimeout(Config().RequestTimeout()),
-	)
-	stats, err := client.Fetch(context.Background(), secret)
-	if err != nil {
-		return CodexZHUsageStats{}, err
-	}
-	return CodexZHUsageStats(stats), nil
-}
-
-func (s AccountService) fetchAiokUsage(account domains.Account, secret string) (TokeniUsageStats, error) {
-	baseURL := strings.TrimSpace(account.UsageAPIURL)
-	if baseURL == "" {
-		baseURL = aiok.UsageURL
-	}
-	httpClient, err := UpstreamHTTPClient()
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	client := aiok.NewUsageClient(
-		aiok.WithUsageBaseURL(baseURL),
-		aiok.WithUsageHTTPClient(httpClient),
-		aiok.WithUsageTimeout(Config().RequestTimeout()),
-	)
-	stats, err := client.Fetch(context.Background(), secret)
-	if err != nil {
-		return TokeniUsageStats{}, err
-	}
-	return TokeniUsageStats{Balance: stats.Balance}, nil
-}
-
-func (s AccountService) upsertCodexZHQuotas(account domains.Account, stats CodexZHUsageStats) ([]domains.AccountQuota, error) {
-	now := time.Now().UnixMilli()
-	extra, _ := json.Marshal(map[string]any{
-		"todayCalls":        stats.TodayCalls,
-		"totalCalls":        stats.TotalCalls,
-		"rpm":               stats.RPM,
-		"tpm":               stats.TPM,
-		"subscriptionStart": stats.SubscriptionStart,
-		"subscriptionEnd":   stats.SubscriptionEnd,
-	})
-	dailyTotal := codexZHQuotaToUSD(stats.DailyQuota)
-	weeklyTotal := codexZHQuotaToUSD(stats.WeeklyQuota)
-	inputs := []QuotaInput{
-		{
-			AccountGuid:     account.Guid,
-			WindowType:      "daily",
-			Unit:            "usd",
-			UsedAmount:      stats.TodayUsed,
-			RemainingAmount: dailyTotal - stats.TodayUsed,
-			TotalAmount:     dailyTotal,
-			ResetAt:         defaultQuotaResetAt("daily", now),
-			LastSyncedAt:    now,
-			Extra:           string(extra),
-		},
-		{
-			AccountGuid:     account.Guid,
-			WindowType:      "weekly",
-			Unit:            "usd",
-			UsedAmount:      stats.WeekUsed,
-			RemainingAmount: weeklyTotal - stats.WeekUsed,
-			TotalAmount:     weeklyTotal,
-			ResetAt:         parseUsageTime(stats.SubscriptionEnd),
-			LastSyncedAt:    now,
-			Extra:           string(extra),
-		},
-	}
-	quotas := make([]domains.AccountQuota, 0, len(inputs))
-	for _, input := range inputs {
-		quota, err := QuotaServiceApp.Upsert(input)
-		if err != nil {
-			return nil, err
-		}
-		quotas = append(quotas, quota)
-	}
-	return quotas, nil
-}
-
-func (s AccountService) upsertTokeniQuota(account domains.Account, stats TokeniUsageStats) ([]domains.AccountQuota, error) {
-	now := time.Now().UnixMilli()
-	status := domains.QuotaStatusAvailable
-	if stats.Balance <= 0 {
-		status = domains.QuotaStatusExhausted
-	}
-	extra, _ := json.Marshal(map[string]any{
-		"balance": stats.Balance,
-	})
-	quota, err := QuotaServiceApp.Upsert(QuotaInput{
-		AccountGuid:     account.Guid,
-		WindowType:      "balance",
-		Unit:            "usd",
-		RemainingAmount: stats.Balance,
-		TotalAmount:     stats.Balance,
-		ResetAt:         0,
-		LastSyncedAt:    now,
-		Status:          status,
-		Extra:           string(extra),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return []domains.AccountQuota{quota}, nil
-}
-
-func (s AccountService) upsertAiokQuota(account domains.Account, stats TokeniUsageStats) ([]domains.AccountQuota, error) {
-	return s.upsertTokeniQuota(account, stats)
+	return UsageRefreshSweepResult{}, nil
 }
 
 func (s AccountService) Reorder(input ReorderAccountInput) error {
@@ -1278,59 +866,6 @@ func (s AccountService) MarkExpiredSubscriptions() error {
 		Update("status", domains.AccountStatusExpired).Error
 }
 
-func (s AccountService) applyUsageRefreshStatus(account domains.Account, quotas []domains.AccountQuota) error {
-	if account.Guid == "" {
-		return nil
-	}
-	now := time.Now().UnixMilli()
-	status := account.Status
-	cooldownUntil := account.CooldownUntil
-	failureCount := account.FailureCount
-	switch {
-	case !account.Enabled:
-		status = domains.AccountStatusDisabled
-	case account.SubscriptionExpiredAt > 0 && account.SubscriptionExpiredAt <= now:
-		status = domains.AccountStatusExpired
-	case hasBlockingQuotaSnapshot(quotas, now):
-		status = domains.AccountStatusExhausted
-		cooldownUntil = 0
-	default:
-		if status == "" || status == domains.AccountStatusUnknown || status == domains.AccountStatusLimited || status == domains.AccountStatusCooldown || status == domains.AccountStatusExhausted {
-			status = domains.AccountStatusAvailable
-			cooldownUntil = 0
-			failureCount = 0
-		}
-	}
-	if err := global.NAV_DB.Model(&account).Updates(map[string]any{
-		"status":            status,
-		"cooldown_until":    cooldownUntil,
-		"failure_count":     failureCount,
-		"last_refreshed_at": now,
-	}).Error; err != nil {
-		return err
-	}
-	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	return nil
-}
-
-func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
-	for _, quota := range quotas {
-		if quota.ResetAt > 0 && quota.ResetAt <= now {
-			continue
-		}
-		if quota.Status == domains.QuotaStatusExhausted {
-			return true
-		}
-		if quota.TotalAmount > 0 && (quota.RemainingAmount <= 0 || quota.UsedPercent >= QuotaExhaustedPercentThreshold) {
-			return true
-		}
-		if quota.TotalTokens > 0 && (quota.RemainingTokens <= 0 || quota.UsedPercent >= QuotaExhaustedPercentThreshold) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s AccountService) DecryptSecret(account domains.Account) (string, error) {
 	utils.SetSecretKeyFile(Config().SecretKeyFile)
 	return utils.DecryptSecret(account.EncryptedSecret)
@@ -1408,112 +943,30 @@ func firstSupportedModel(raw string) string {
 	return models[0]
 }
 
-func validateCustomProvider(provider, apiBaseURL, supplierName, officialURL string) error {
-	if strings.TrimSpace(provider) != "custom" {
-		return nil
+func validateOfficialAccountProvider(provider, apiBaseURL string) error {
+	if strings.ToLower(strings.TrimSpace(provider)) != "openai" {
+		return fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", provider)
 	}
-	if strings.TrimSpace(apiBaseURL) == "" {
-		return errors.New("apiBaseUrl is required for custom provider")
-	}
-	if strings.TrimSpace(supplierName) == "" {
-		return errors.New("supplierName is required for custom provider")
-	}
-	if strings.TrimSpace(officialURL) == "" {
-		return errors.New("officialUrl is required for custom provider")
+	if strings.TrimRight(strings.TrimSpace(apiBaseURL), "/") != proxyapi.DefaultBaseURL {
+		return fmt.Errorf("unsupported OpenAI base URL %q: only %s is enabled", apiBaseURL, proxyapi.DefaultBaseURL)
 	}
 	return nil
 }
 
 func normalizeAccountProviderConfig(input *CreateAccountInput) {
-	input.Provider = strings.TrimSpace(input.Provider)
-	input.APIBaseURL = strings.TrimSpace(input.APIBaseURL)
-	if input.Provider != "custom" && input.APIBaseURL == "" {
-		input.APIBaseURL = providerDefaultAPIBaseURL(input.Provider)
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider == "" {
+		provider = "openai"
 	}
-}
-
-func providerDefaultAPIBaseURL(provider string) string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codexzh":
-		return proxycodexzh.BaseURL
-	case "freemodel":
-		return proxyfreemodel.BaseURL
-	case "aiok":
-		return aiok.BaseURL
-	case "tokeni":
-		return proxytokeni.BaseURL
-	default:
-		return Config().DefaultUpstreamBaseURL
-	}
+	input.Provider = provider
+	input.APIBaseURL = proxyapi.DefaultBaseURL
+	input.SupplierName = "OpenAI"
+	input.OfficialURL = "https://openai.com"
 }
 
 func normalizeAccountUsageConfig(input *CreateAccountInput) {
-	input.UsageQueryType = normalizeUsageQueryType(input.UsageQueryType)
-	input.UsageAPIURL = strings.TrimSpace(input.UsageAPIURL)
-	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "codexzh") {
-		input.UsageQueryType = "codexzh"
-	}
-	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "freemodel") {
-		input.UsageQueryType = "freemodel"
-	}
-	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "aiok") {
-		input.UsageQueryType = "aiok"
-	}
-	if input.UsageQueryType == "" && strings.EqualFold(strings.TrimSpace(input.Provider), "tokeni") {
-		input.UsageQueryType = "tokeni"
-	}
-	if input.UsageQueryType == "codexzh" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = proxycodexzh.UsageURL
-	}
-	if input.UsageQueryType == "freemodel" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = "https://freemodel.dev/api/usage"
-	}
-	if input.UsageQueryType == "aiok" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = aiok.UsageURL
-	}
-	if input.UsageQueryType == "tokeni" && input.UsageAPIURL == "" {
-		input.UsageAPIURL = proxytokeni.UsageURL
-	}
-}
-
-func normalizeUsageQueryType(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func accountBaseURL(account domains.Account) string {
-	if baseURL := strings.TrimSpace(account.APIBaseURL); baseURL != "" {
-		return baseURL
-	}
-	return providerDefaultAPIBaseURL(account.Provider)
-}
-
-func parseModelListResponse(body []byte) []string {
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-		Models []string `json:"models"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil
-	}
-	seen := map[string]bool{}
-	models := make([]string, 0, len(payload.Data)+len(payload.Models))
-	for _, item := range payload.Data {
-		id := strings.TrimSpace(item.ID)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			models = append(models, id)
-		}
-	}
-	for _, item := range payload.Models {
-		id := strings.TrimSpace(item)
-		if id != "" && !seen[id] {
-			seen[id] = true
-			models = append(models, id)
-		}
-	}
-	return models
+	input.UsageQueryType = ""
+	input.UsageAPIURL = ""
 }
 
 func collectValues(out map[string]string, values url.Values) {
@@ -1532,28 +985,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func codexZHQuotaToUSD(value float64) float64 {
-	return proxycodexzh.QuotaToUSD(value)
-}
-
-func parseUsageTime(value string) int64 {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	layouts := []string{
-		time.RFC3339,
-		"2006-01-02 15:04:05",
-		"2006-01-02",
-		"2006/01/02 15:04:05",
-		"2006/01/02",
-	}
-	for _, layout := range layouts {
-		if t, err := time.ParseInLocation(layout, value, time.Local); err == nil {
-			return t.UnixMilli()
-		}
-	}
-	return 0
 }

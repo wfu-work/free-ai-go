@@ -3,7 +3,6 @@ package apis
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,9 +29,9 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	var availableAccounts int64
 	var models int64
 	var platformKeys int64
-	_ = global.NAV_DB.Model(&domains.Account{}).Count(&accounts).Error
-	_ = global.NAV_DB.Model(&domains.Account{}).Where("enabled = ? AND status = ?", true, domains.AccountStatusAvailable).Count(&availableAccounts).Error
-	_ = global.NAV_DB.Model(&domains.ModelMapping{}).Where("enabled = ?", true).Count(&models).Error
+	_ = global.NAV_DB.Model(&domains.Account{}).Where("provider = ?", "openai").Count(&accounts).Error
+	_ = global.NAV_DB.Model(&domains.Account{}).Where("enabled = ? AND status = ? AND provider = ?", true, domains.AccountStatusAvailable, "openai").Count(&availableAccounts).Error
+	_ = global.NAV_DB.Model(&domains.ModelMapping{}).Where("enabled = ? AND provider = ?", true, "openai").Count(&models).Error
 	_ = global.NAV_DB.Model(&domains.PlatformKey{}).Where("enabled = ?", true).Count(&platformKeys).Error
 	response.Ok(gin.H{
 		"ok":                true,
@@ -201,19 +200,7 @@ func nextUsageCheckAt(account domains.Account, quotas []domains.AccountQuota) in
 	return next
 }
 
-func supportsAccountUsageQuery(account domains.Account) bool {
-	if strings.TrimSpace(account.UsageQueryType) == "codexzh" || strings.EqualFold(account.Provider, "codexzh") {
-		return true
-	}
-	if strings.TrimSpace(account.UsageQueryType) != "" {
-		return false
-	}
-	values := []string{account.SupplierName, account.OfficialURL, account.APIBaseURL, account.UsageAPIURL}
-	for _, value := range values {
-		if strings.Contains(strings.ToLower(strings.TrimSpace(value)), "codexzh") {
-			return true
-		}
-	}
+func supportsAccountUsageQuery(domains.Account) bool {
 	return false
 }
 

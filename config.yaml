@@ -22,7 +22,6 @@ zap:
   retention-day: 7
 freeai:
   proxy-prefix: /v1
-  default-upstream-base-url: "https://api.openai.com/v1"
   request-timeout-seconds: 120
   stream-idle-timeout-seconds: 60
   max-retries: 1

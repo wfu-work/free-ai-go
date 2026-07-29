@@ -38,7 +38,7 @@ func Init() {
 		registerTables()
 	})
 	sysInit.OnRouterInit(func(publicGroup *gin.RouterGroup, privateGroup *gin.RouterGroup) {
-		routers.RouterGroupApp.InitFreeModelRouters(publicGroup, privateGroup)
+		routers.RouterGroupApp.InitGatewayRouters(publicGroup, privateGroup)
 	})
 	sysInit.OnOtherInit(func() {
 		services.StartOpenAIOAuthCallbackServer()

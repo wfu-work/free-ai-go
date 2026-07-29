@@ -11,9 +11,8 @@ import (
 	"github.com/wfu-work/nav-common-go-lib/global"
 )
 
-type FreeModelConfig struct {
+type GatewayConfig struct {
 	ProxyPrefix              string
-	DefaultUpstreamBaseURL   string
 	RequestTimeoutSeconds    int64
 	StreamIdleTimeoutSeconds int64
 	MaxRetries               int
@@ -46,7 +45,6 @@ type GatewayProxyConfigInput struct {
 const (
 	systemConfigGroupGateway               = "gateway"
 	systemConfigProxyPrefix                = "freeai.proxy-prefix"
-	systemConfigDefaultUpstreamBaseURL     = "freeai.default-upstream-base-url"
 	systemConfigRequestTimeoutSeconds      = "freeai.request-timeout-seconds"
 	systemConfigStreamIdleTimeoutSeconds   = "freeai.stream-idle-timeout-seconds"
 	systemConfigMaxRetries                 = "freeai.max-retries"
@@ -71,26 +69,19 @@ const (
 	systemConfigGatewayStreamIdleTimeoutMs = "gateway.upstream-stream-idle-timeout-ms"
 )
 
-func Config() FreeModelConfig {
+func Config() GatewayConfig {
 	m := map[string]any{}
 	if global.NAV_VIPER != nil {
 		m = global.NAV_VIPER.GetStringMap("freeai")
-		if len(m) == 0 {
-			m = global.NAV_VIPER.GetStringMap("freemodel")
-		}
 	} else if global.NAV_CONFIG.Extras != nil {
 		m = cast.ToStringMap(global.NAV_CONFIG.Extras["freeai"])
-		if len(m) == 0 {
-			m = cast.ToStringMap(global.NAV_CONFIG.Extras["freemodel"])
-		}
 	}
 	openAICallbackEnabled := true
 	if _, ok := m["openai-callback-enabled"]; ok {
 		openAICallbackEnabled = cast.ToBool(m["openai-callback-enabled"])
 	}
-	cfg := FreeModelConfig{
+	cfg := GatewayConfig{
 		ProxyPrefix:              stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
-		DefaultUpstreamBaseURL:   stringDefault(cast.ToString(m["default-upstream-base-url"]), "https://api.openai.com/v1"),
 		RequestTimeoutSeconds:    int64Default(cast.ToInt64(m["request-timeout-seconds"]), 120),
 		StreamIdleTimeoutSeconds: int64Default(cast.ToInt64(m["stream-idle-timeout-seconds"]), 60),
 		MaxRetries:               intDefault(cast.ToInt(m["max-retries"]), 1),
@@ -109,9 +100,8 @@ func Config() FreeModelConfig {
 	return cfg
 }
 
-func applySystemConfigOverrides(cfg *FreeModelConfig) {
+func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.ProxyPrefix = SystemConfigServiceApp.GetString(systemConfigProxyPrefix, cfg.ProxyPrefix)
-	cfg.DefaultUpstreamBaseURL = SystemConfigServiceApp.GetString(systemConfigDefaultUpstreamBaseURL, cfg.DefaultUpstreamBaseURL)
 	cfg.RequestTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigRequestTimeoutSeconds, cfg.RequestTimeoutSeconds)
 	cfg.StreamIdleTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigStreamIdleTimeoutSeconds, cfg.StreamIdleTimeoutSeconds)
 	cfg.MaxRetries = SystemConfigServiceApp.GetInt(systemConfigMaxRetries, cfg.MaxRetries)
@@ -127,11 +117,11 @@ func applySystemConfigOverrides(cfg *FreeModelConfig) {
 	cfg.UpstreamProxyURL = strings.TrimSpace(SystemConfigServiceApp.GetString(systemConfigUpstreamProxyURL, cfg.UpstreamProxyURL))
 }
 
-func (c FreeModelConfig) RequestTimeout() time.Duration {
+func (c GatewayConfig) RequestTimeout() time.Duration {
 	return time.Duration(c.RequestTimeoutSeconds) * time.Second
 }
 
-func (c FreeModelConfig) EffectiveUpstreamProxyURL() string {
+func (c GatewayConfig) EffectiveUpstreamProxyURL() string {
 	if !c.UpstreamProxyEnabled {
 		return ""
 	}

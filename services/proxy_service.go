@@ -30,9 +30,6 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		modelName = r.Header.Get("X-FreeAi-Model")
 	}
 	if modelName == "" {
-		modelName = r.Header.Get("X-FreeModel-Model")
-	}
-	if modelName == "" {
 		modelName = logMeta.Model
 	}
 	platformKey, err := PlatformKeyServiceApp.Verify(r.Header.Get("Authorization"))
@@ -284,9 +281,7 @@ func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string
 		Stream:   stream,
 	}
 	provider := ProxyProviderConfig{
-		Name:    selection.Model.Provider,
-		BaseURL: accountBaseURL(selection.Account),
-		WireAPI: "responses",
+		Name: "openai",
 	}
 	credential := ProxyCredential{Type: selection.Account.AuthType, Value: secret}
 	timeout := time.Duration(selection.Model.TimeoutSec) * time.Second
