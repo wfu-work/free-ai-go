@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,21 +10,12 @@ import (
 	"strings"
 	"time"
 
-	proxyapi "github.com/wfu-work/proxy-api-lib"
-	"github.com/wfu-work/proxy-api-lib/auth"
+	"github.com/wfu-work/free-ai-go/domains"
+	"github.com/wfu-work/proxy-api-lib/chatgpt"
 	"github.com/wfu-work/proxy-api-lib/codec/chatcompletions"
 	responsescodec "github.com/wfu-work/proxy-api-lib/codec/responses"
 	"github.com/wfu-work/proxy-api-lib/openai"
 )
-
-type ProxyProviderConfig struct {
-	Name string
-}
-
-type ProxyCredential struct {
-	Type  string
-	Value string
-}
 
 type ProxyRequest struct {
 	Endpoint string
@@ -35,8 +25,9 @@ type ProxyRequest struct {
 }
 
 type ProxyUsage struct {
-	InputTokens  int64
-	OutputTokens int64
+	InputTokens       int64
+	CachedInputTokens int64
+	OutputTokens      int64
 }
 
 type ProxyResult struct {
@@ -51,77 +42,84 @@ type ProxyResult struct {
 }
 
 type ProxyAPIClient interface {
-	Do(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest) (*ProxyResult, error)
-	Stream(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest, w io.Writer) (*ProxyResult, error)
+	Do(ctx context.Context, account domains.Account, req ProxyRequest) (*ProxyResult, error)
+	Stream(ctx context.Context, account domains.Account, req ProxyRequest, w io.Writer) (*ProxyResult, error)
 }
 
 type ProxyAPIClientImpl struct{}
 
 var ProxyAPIClientApp ProxyAPIClient = ProxyAPIClientImpl{}
 
-func (ProxyAPIClientImpl) Do(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest) (*ProxyResult, error) {
-	if err := validateOfficialProvider(provider); err != nil {
-		return nil, err
-	}
-	if req.Endpoint == "/v1/embeddings" {
-		return doEmbedding(ctx, credential, req)
-	}
+func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req ProxyRequest) (*ProxyResult, error) {
 	start := time.Now()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	responseReq.Model = req.Model
-	client, err := newProxyClient(credential)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Responses.Create(ctx, responseReq)
+	file, err := AccountServiceApp.ActiveAccountFile(ctx, account, false)
 	if err != nil {
 		return apiErrorResult(err, time.Since(start).Milliseconds())
 	}
-	body, err := responseBody(req, resp)
+	client, err := chatGPTClient(file)
 	if err != nil {
 		return nil, err
 	}
+	result, err := client.Codex.Create(ctx, accountRouteID(account, file), responseReq)
+	if isChatGPTUnauthorized(err) {
+		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
+			client, _ = chatGPTClient(file)
+			result, err = client.Codex.Create(ctx, accountRouteID(account, file), responseReq)
+		}
+	}
+	if err != nil {
+		return apiErrorResult(err, time.Since(start).Milliseconds())
+	}
+	body, err := responseBody(req, result.Response)
+	if err != nil {
+		return nil, err
+	}
+	latency := time.Since(start).Milliseconds()
 	return &ProxyResult{
-		StatusCode:   http.StatusOK,
-		Header:       http.Header{"Content-Type": []string{"application/json"}},
-		Body:         body,
-		Usage:        usageFromResponse(resp),
-		FirstTokenMs: time.Since(start).Milliseconds(),
-		LatencyMs:    time.Since(start).Milliseconds(),
+		StatusCode: result.StatusCode, Header: result.Header.Clone(), Body: body,
+		Usage: usageFromResponse(result.Response), FirstTokenMs: latency, LatencyMs: latency,
 	}, nil
 }
 
-func (ProxyAPIClientImpl) Stream(ctx context.Context, provider ProxyProviderConfig, credential ProxyCredential, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
-	if err := validateOfficialProvider(provider); err != nil {
-		return nil, err
-	}
+func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
 	start := time.Now()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	responseReq.Model = req.Model
-	client, err := newProxyClient(credential)
-	if err != nil {
-		return nil, err
-	}
-	stream, err := client.Responses.Stream(ctx, responseReq)
+	file, err := AccountServiceApp.ActiveAccountFile(ctx, account, false)
 	if err != nil {
 		return apiErrorResult(err, time.Since(start).Milliseconds())
 	}
-	defer stream.Close()
-
-	result := &ProxyResult{
-		StatusCode: http.StatusOK,
-		Header: http.Header{
-			"Content-Type":  []string{"text/event-stream"},
-			"Cache-Control": []string{"no-cache"},
-			"Connection":    []string{"keep-alive"},
-		},
+	client, err := chatGPTClient(file)
+	if err != nil {
+		return nil, err
 	}
+	upstream, err := client.Codex.Stream(ctx, accountRouteID(account, file), responseReq)
+	if isChatGPTUnauthorized(err) {
+		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
+			client, _ = chatGPTClient(file)
+			upstream, err = client.Codex.Stream(ctx, accountRouteID(account, file), responseReq)
+		}
+	}
+	if err != nil {
+		return apiErrorResult(err, time.Since(start).Milliseconds())
+	}
+	stream := upstream.Stream
+	defer stream.Close()
+	result := &ProxyResult{StatusCode: upstream.StatusCode, Header: upstream.Header.Clone()}
+	if result.Header == nil {
+		result.Header = make(http.Header)
+	}
+	result.Header.Set("Content-Type", "text/event-stream")
+	result.Header.Set("Cache-Control", "no-cache")
+	result.Header.Set("Connection", "keep-alive")
 	flusher, _ := w.(http.Flusher)
 	for stream.Next() {
 		event := stream.Event()
@@ -144,8 +142,6 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, provider ProxyProviderConf
 	streamErr := stream.Err()
 	if req.Endpoint == "/v1/chat/completions" && result.StreamStarted && streamErr == nil {
 		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
-			result.LatencyMs = time.Since(start).Milliseconds()
-			result.ErrorType = classifyError(err)
 			return result, err
 		}
 		if flusher != nil {
@@ -164,36 +160,6 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, provider ProxyProviderConf
 	return result, nil
 }
 
-func newProxyClient(credential ProxyCredential) (*proxyapi.Client, error) {
-	httpClient, err := UpstreamHTTPClient()
-	if err != nil {
-		return nil, err
-	}
-	return proxyapi.NewClient(
-		proxyapi.WithHTTPClient(httpClient),
-		proxyapi.WithCredential(proxyCredential(credential)),
-	), nil
-}
-
-func validateOfficialProvider(provider ProxyProviderConfig) error {
-	name := strings.ToLower(strings.TrimSpace(provider.Name))
-	if name != "" && name != "openai" {
-		return fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", provider.Name)
-	}
-	return nil
-}
-
-func proxyCredential(credential ProxyCredential) openai.Credential {
-	switch credential.Type {
-	case "api_key":
-		return auth.APIKey(credential.Value)
-	case "login_callback":
-		return auth.BearerToken(loginCallbackAccessToken(credential.Value))
-	default:
-		return auth.BearerToken(credential.Value)
-	}
-}
-
 func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
 	switch req.Endpoint {
 	case "/v1/chat/completions":
@@ -201,7 +167,7 @@ func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
 	case "/v1/responses":
 		return responsescodec.Decode(req.Body)
 	default:
-		return openai.ResponseRequest{}, fmt.Errorf("proxy-api-lib does not support endpoint %s", req.Endpoint)
+		return openai.ResponseRequest{}, fmt.Errorf("Codex account pool does not support endpoint %s", req.Endpoint)
 	}
 }
 
@@ -209,24 +175,21 @@ func usageFromResponse(resp *openai.Response) ProxyUsage {
 	if resp == nil || resp.Usage == nil {
 		return ProxyUsage{}
 	}
-	return ProxyUsage{
-		InputTokens:  int64(resp.Usage.InputTokens),
-		OutputTokens: int64(resp.Usage.OutputTokens),
+	usage := ProxyUsage{InputTokens: int64(resp.Usage.InputTokens), OutputTokens: int64(resp.Usage.OutputTokens)}
+	if resp.Usage.InputTokensDetails != nil {
+		usage.CachedInputTokens = int64(resp.Usage.InputTokensDetails.CachedTokens)
 	}
+	return usage
 }
 
 func responseBody(req ProxyRequest, resp *openai.Response) ([]byte, error) {
 	if req.Endpoint == "/v1/chat/completions" {
-		return json.Marshal(chatCompletionResponse(req.Model, resp))
+		return json.Marshal(chatcompletions.Response(req.Model, resp))
 	}
-	if len(resp.Raw) > 0 {
+	if resp != nil && len(resp.Raw) > 0 {
 		return resp.Raw, nil
 	}
 	return json.Marshal(resp)
-}
-
-func chatCompletionResponse(model string, resp *openai.Response) map[string]any {
-	return chatcompletions.Response(model, resp)
 }
 
 func writeStreamEvent(w io.Writer, req ProxyRequest, event openai.StreamEvent) error {
@@ -245,35 +208,18 @@ func writeStreamEvent(w io.Writer, req ProxyRequest, event openai.StreamEvent) e
 		return writeChatCompletionChunk(w, req.Model, map[string]any{}, finishReason)
 	}
 	if added, ok := event.OutputItemAdded(); ok && added.Item.Type == "function_call" {
-		callID := added.Item.CallID
-		if callID == "" {
-			callID = added.Item.ID
-		}
-		toolCall := map[string]any{
-			"index": added.OutputIndex,
-			"id":    callID,
-			"type":  "function",
-			"function": map[string]any{
-				"name":      added.Item.Name,
-				"arguments": added.Item.Arguments,
-			},
-		}
+		callID := firstNonEmpty(added.Item.CallID, added.Item.ID)
+		toolCall := map[string]any{"index": added.OutputIndex, "id": callID, "type": "function", "function": map[string]any{"name": added.Item.Name, "arguments": added.Item.Arguments}}
 		return writeChatCompletionChunk(w, req.Model, map[string]any{"tool_calls": []map[string]any{toolCall}}, "")
 	}
 	if arguments, ok := event.FunctionCallArgumentsDelta(); ok {
-		toolCall := map[string]any{
-			"index": arguments.OutputIndex,
-			"function": map[string]any{
-				"arguments": arguments.Delta,
-			},
-		}
+		toolCall := map[string]any{"index": arguments.OutputIndex, "function": map[string]any{"arguments": arguments.Delta}}
 		return writeChatCompletionChunk(w, req.Model, map[string]any{"tool_calls": []map[string]any{toolCall}}, "")
 	}
-	delta := event.TextDelta()
-	if delta == "" {
-		return nil
+	if delta := event.TextDelta(); delta != "" {
+		return writeChatCompletionChunk(w, req.Model, map[string]any{"content": delta}, "")
 	}
-	return writeChatCompletionChunk(w, req.Model, map[string]any{"content": delta}, "")
+	return nil
 }
 
 func writeChatCompletionChunk(w io.Writer, model string, delta map[string]any, finishReason any) error {
@@ -281,17 +227,8 @@ func writeChatCompletionChunk(w io.Writer, model string, delta map[string]any, f
 		finishReason = nil
 	}
 	chunk := map[string]any{
-		"id":      "chatcmpl-stream",
-		"object":  "chat.completion.chunk",
-		"created": time.Now().Unix(),
-		"model":   model,
-		"choices": []map[string]any{
-			{
-				"index":         0,
-				"delta":         delta,
-				"finish_reason": finishReason,
-			},
-		},
+		"id": "chatcmpl-stream", "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model,
+		"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finishReason}},
 	}
 	data, err := json.Marshal(chunk)
 	if err != nil {
@@ -304,188 +241,63 @@ func writeChatCompletionChunk(w io.Writer, model string, delta map[string]any, f
 func apiErrorResult(err error, latencyMs int64) (*ProxyResult, error) {
 	status := http.StatusBadGateway
 	errorType := classifyError(err)
-	var apiErr *openai.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode > 0 {
-		status = apiErr.StatusCode
+	var openAIErr *openai.APIError
+	var chatGPTErr *chatgpt.APIError
+	if errors.As(err, &openAIErr) && openAIErr.StatusCode > 0 {
+		status = openAIErr.StatusCode
+	} else if errors.As(err, &chatGPTErr) && chatGPTErr.StatusCode > 0 {
+		status = chatGPTErr.StatusCode
 	}
-	body, marshalErr := json.Marshal(map[string]any{
-		"error": map[string]any{
-			"message": err.Error(),
-			"type":    errorType,
-			"code":    errorType,
-		},
-	})
+	body, marshalErr := json.Marshal(map[string]any{"error": map[string]any{"message": err.Error(), "type": errorType, "code": errorType}})
 	if marshalErr != nil {
 		return nil, marshalErr
 	}
-	return &ProxyResult{
-		StatusCode:   status,
-		Header:       http.Header{"Content-Type": []string{"application/json"}},
-		Body:         body,
-		ErrorType:    errorType,
-		FirstTokenMs: latencyMs,
-		LatencyMs:    latencyMs,
-	}, nil
-}
-
-func doEmbedding(ctx context.Context, credential ProxyCredential, req ProxyRequest) (*ProxyResult, error) {
-	start := time.Now()
-	var payload map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(req.Body))
-	decoder.UseNumber()
-	if err := decoder.Decode(&payload); err != nil {
-		return nil, err
-	}
-	embeddingReq := openai.EmbeddingRequest{
-		Model: req.Model,
-		Input: payload["input"],
-		Extra: map[string]any{},
-	}
-	if embeddingReq.Model == "" {
-		embeddingReq.Model, _ = payload["model"].(string)
-	}
-	if value, ok := payload["encoding_format"].(string); ok {
-		embeddingReq.EncodingFormat = value
-	}
-	if value, ok := payload["user"].(string); ok {
-		embeddingReq.User = value
-	}
-	if value, ok := integerValue(payload["dimensions"]); ok {
-		embeddingReq.Dimensions = &value
-	}
-	for key, value := range payload {
-		switch key {
-		case "model", "input", "encoding_format", "dimensions", "user":
-		default:
-			embeddingReq.Extra[key] = value
-		}
-	}
-	if len(embeddingReq.Extra) == 0 {
-		embeddingReq.Extra = nil
-	}
-	client, err := newProxyClient(credential)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Embeddings.Create(ctx, embeddingReq)
-	if err != nil {
-		return apiErrorResult(err, time.Since(start).Milliseconds())
-	}
-	body := resp.Raw
-	if len(body) == 0 {
-		body, err = json.Marshal(resp)
-		if err != nil {
-			return nil, err
-		}
-	}
-	latencyMs := time.Since(start).Milliseconds()
-	return &ProxyResult{
-		StatusCode:   http.StatusOK,
-		Header:       http.Header{"Content-Type": []string{"application/json"}},
-		Body:         body,
-		Usage:        ProxyUsage{InputTokens: int64(resp.Usage.PromptTokens)},
-		FirstTokenMs: latencyMs,
-		LatencyMs:    time.Since(start).Milliseconds(),
-	}, nil
-}
-
-func integerValue(value any) (int, bool) {
-	switch typed := value.(type) {
-	case int:
-		return typed, true
-	case float64:
-		return int(typed), true
-	case json.Number:
-		number, err := typed.Int64()
-		return int(number), err == nil
-	default:
-		return 0, false
-	}
+	return &ProxyResult{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, ErrorType: errorType, FirstTokenMs: latencyMs, LatencyMs: latencyMs}, nil
 }
 
 func classifyError(err error) string {
 	if err == nil {
 		return ""
 	}
-	var apiErr *openai.APIError
-	if errors.As(err, &apiErr) {
-		return classifyAPIError(apiErr)
+	var openAIErr *openai.APIError
+	if errors.As(err, &openAIErr) {
+		return classifyStatusError(openAIErr.StatusCode, openAIErr.Code+" "+openAIErr.Type+" "+openAIErr.Message)
+	}
+	var chatGPTErr *chatgpt.APIError
+	if errors.As(err, &chatGPTErr) {
+		return classifyStatusError(chatGPTErr.StatusCode, chatGPTErr.Code+" "+chatGPTErr.Type+" "+chatGPTErr.Message)
 	}
 	text := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(text, "no_available_account"):
-		return "no_available_account"
+		return domains.ErrorNoAvailableAccount
 	case strings.Contains(text, "model_not_supported") || strings.Contains(text, "record not found"):
-		return "model_not_supported"
+		return domains.ErrorModelNotSupported
+	case strings.Contains(text, "oauth") || strings.Contains(text, "refresh_token") || strings.Contains(text, "refresh token"):
+		return domains.ErrorAuthFailed
 	case strings.Contains(text, "timeout") || strings.Contains(text, "deadline"):
-		return "upstream_timeout"
+		return domains.ErrorUpstreamTimeout
 	case strings.Contains(text, "network") || strings.Contains(text, "connection"):
-		return "network_error"
+		return domains.ErrorNetwork
 	default:
-		return "upstream_5xx"
+		return domains.ErrorUpstream5xx
 	}
 }
 
-func classifyAPIError(err *openai.APIError) string {
-	if err == nil {
-		return ""
-	}
-	text := strings.ToLower(err.Code + " " + err.Type + " " + err.Message)
+func classifyStatusError(status int, message string) string {
+	text := strings.ToLower(message)
 	switch {
 	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
-		return "quota_exhausted"
-	case err.StatusCode == http.StatusUnauthorized || err.StatusCode == http.StatusForbidden:
-		return "auth_failed"
-	case err.StatusCode == http.StatusTooManyRequests:
-		return "rate_limited"
-	case err.StatusCode == http.StatusRequestTimeout || err.StatusCode == http.StatusGatewayTimeout:
-		return "upstream_timeout"
-	case err.StatusCode >= 500:
-		return "upstream_5xx"
-	default:
-		return "network_error"
-	}
-}
-
-func classifyHTTPStatus(status int, body []byte) string {
-	text := strings.ToLower(string(body))
-	switch {
+		return domains.ErrorQuotaExhausted
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return "auth_failed"
-	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
-		return "quota_exhausted"
+		return domains.ErrorAuthFailed
 	case status == http.StatusTooManyRequests:
-		return "rate_limited"
+		return domains.ErrorRateLimited
 	case status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout:
-		return "upstream_timeout"
+		return domains.ErrorUpstreamTimeout
 	case status >= 500:
-		return "upstream_5xx"
+		return domains.ErrorUpstream5xx
+	default:
+		return domains.ErrorNetwork
 	}
-	return "network_error"
-}
-
-func loginCallbackAccessToken(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return value
-	}
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(value), &payload); err == nil {
-		if token := strings.TrimSpace(payload["api_key_access_token"]); token != "" {
-			return token
-		}
-		if token := strings.TrimSpace(payload["apiKeyAccessToken"]); token != "" {
-			return token
-		}
-		if token := strings.TrimSpace(payload["api_key_token"]); token != "" {
-			return token
-		}
-		if token := strings.TrimSpace(payload["access_token"]); token != "" {
-			return token
-		}
-		if token := strings.TrimSpace(payload["token"]); token != "" {
-			return token
-		}
-	}
-	return value
 }

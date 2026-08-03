@@ -2,41 +2,12 @@ package apis
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	"github.com/wfu-work/nav-common-go-lib/response"
 	"go.uber.org/zap"
 )
 
 type QuotaApi struct{}
-
-// Upsert 写入或更新账号额度
-// @Summary 写入或更新账号额度
-// @Description 写入或更新账号额度
-// @Tags 额度模块
-// @Security ApiKeyAuth
-// @Accept json
-// @Produce json
-// @Param guid path string true "账号guid"
-// @Param data body services.QuotaInput true "额度信息"
-// @Success 200 {object} response.Response{data=domains.AccountQuota,msg=string}
-// @Router /accounts/{guid}/quotas [post]
-func (a QuotaApi) Upsert(c *gin.Context) {
-	var input services.QuotaInput
-	if err := c.ShouldBindJSON(&input); err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	if input.AccountGuid == "" {
-		input.AccountGuid = c.Param("guid")
-	}
-	quota, err := quotaService.Upsert(input)
-	if err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	response.Ok(quota, c)
-}
 
 // List 分页获取额度列表
 // @Summary 分页获取额度列表

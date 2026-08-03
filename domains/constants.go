@@ -1,6 +1,16 @@
 package domains
 
 const (
+	VendorOpenAI              = "openai"
+	VendorGoogle              = "google"
+	VendorAnthropic           = "anthropic"
+	ProductCodex              = "codex"
+	ProductGemini             = "gemini"
+	ProductClaudeCode         = "claude_code"
+	CredentialOAuth           = "oauth"
+	ProtocolOpenAIResponses   = "openai_responses"
+	ProtocolAnthropicMessages = "anthropic_messages"
+
 	AccountStatusAvailable = "available"
 	AccountStatusLimited   = "limited"
 	AccountStatusCooldown  = "cooldown"
@@ -15,9 +25,10 @@ const (
 	QuotaStatusExhausted = "exhausted"
 	QuotaStatusUnknown   = "unknown"
 
-	AuthTypeAPIKey        = "api_key"
-	AuthTypeBearerToken   = "bearer_token"
-	AuthTypeLoginCallback = "login_callback"
+	TokenStatusActive        = "active"
+	TokenStatusRefreshNeeded = "refresh_needed"
+	TokenStatusRefreshFailed = "refresh_failed"
+	TokenStatusInvalid       = "invalid"
 
 	ErrorAuthFailed         = "auth_failed"
 	ErrorRateLimited        = "rate_limited"

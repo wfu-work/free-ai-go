@@ -9,7 +9,7 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cast v1.10.0
 	github.com/wfu-work/nav-common-go-lib v0.0.0-20260721155653-38ed4a403c2b
-	github.com/wfu-work/proxy-api-lib v0.0.0-20260729010252-6556f420c7be
+	github.com/wfu-work/proxy-api-lib v0.0.0-20260803150218-e173da73876e
 	go.uber.org/zap v1.28.0
 	go.yaml.in/yaml/v3 v3.0.4
 	gorm.io/gorm v1.31.2

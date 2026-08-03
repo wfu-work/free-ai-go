@@ -5,10 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"sort"
+	"hash/fnv"
 	"strings"
 	"time"
 
@@ -16,32 +13,61 @@ import (
 	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	commonUtils "github.com/wfu-work/nav-common-go-lib/utils"
-	proxyapi "github.com/wfu-work/proxy-api-lib"
+	"github.com/wfu-work/proxy-api-lib/catalog"
+	"github.com/wfu-work/proxy-api-lib/chatgpt"
+	"github.com/wfu-work/proxy-api-lib/codexauth"
+	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
 type AccountService struct{}
 
 var AccountServiceApp = AccountService{}
+var accountTokenRefreshGroup singleflight.Group
+var accountModelSyncGroup singleflight.Group
 
-type CreateAccountInput struct {
-	Name                  string `json:"name"`
-	Email                 string `json:"email"`
-	Provider              string `json:"provider"`
-	APIBaseURL            string `json:"apiBaseUrl"`
-	SupplierName          string `json:"supplierName"`
-	OfficialURL           string `json:"officialUrl"`
-	UsageQueryType        string `json:"usageQueryType"`
-	UsageAPIURL           string `json:"usageApiUrl"`
-	AccountType           string `json:"accountType"`
-	AuthType              string `json:"authType"`
-	Secret                string `json:"secret"`
-	SupportedModels       string `json:"supportedModels"`
-	AccountGroup          string `json:"accountGroup"`
-	Priority              int    `json:"priority"`
-	Weight                int    `json:"weight"`
-	SubscriptionExpiredAt int64  `json:"subscriptionExpiredAt"`
-	Remark                string `json:"remark"`
+const (
+	tokenRefreshSkew = 2 * time.Minute
+)
+
+type ImportAccountInput struct {
+	AccountFile  json.RawMessage `json:"accountFile"`
+	VendorCode   string          `json:"vendorCode"`
+	Name         string          `json:"name"`
+	AccountGroup string          `json:"accountGroup"`
+	Priority     int             `json:"priority"`
+	Weight       int             `json:"weight"`
+	Remark       string          `json:"remark"`
+}
+
+// AccountPoolInput 是所有官方账号添加方式共用的账号池配置。
+type AccountPoolInput struct {
+	VendorCode   string `json:"vendorCode"`
+	Name         string `json:"name"`
+	AccountGroup string `json:"accountGroup"`
+	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
+	Remark       string `json:"remark"`
+}
+
+// ManualAccountInput 用于手动录入已取得的 OpenAI OAuth 凭据。
+// Access Token 可省略，此时服务端会使用 Refresh Token 换取一组有效令牌。
+type ManualAccountInput struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	IDToken      string `json:"idToken"`
+	AccountID    string `json:"accountId"`
+	AccountPoolInput
+}
+
+type UpdateAccountInput struct {
+	Name         string `json:"name"`
+	VendorCode   string `json:"vendorCode"`
+	AccountGroup string `json:"accountGroup"`
+	Priority     int    `json:"priority"`
+	Weight       int    `json:"weight"`
+	Remark       string `json:"remark"`
 }
 
 type ReorderAccountInput struct {
@@ -60,77 +86,21 @@ type AccountTestInput struct {
 }
 
 type FetchAccountModelsInput struct {
-	Guid       string `json:"guid"`
-	Provider   string `json:"provider"`
-	APIBaseURL string `json:"apiBaseUrl"`
-	AuthType   string `json:"authType"`
-	Secret     string `json:"secret"`
-}
-
-const (
-	openAIOAuthClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
-	openAIOAuthRedirectURI  = "http://localhost:1455/auth/callback"
-	openAIOAuthTokenURL     = "https://auth.openai.com/oauth/token"
-	openAIOAuthDefaultScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
-	openAIOAuthAPIKeyToken  = "openai-api-key"
-)
-
-type LoginCallbackParseInput struct {
-	Provider     string `json:"provider"`
-	CallbackURL  string `json:"callbackUrl"`
-	CodeVerifier string `json:"codeVerifier"`
-	RedirectURI  string `json:"redirectUri"`
-}
-
-type LoginCallbackParseResult struct {
-	Provider       string            `json:"provider"`
-	AuthType       string            `json:"authType"`
-	Secret         string            `json:"secret"`
-	SecretHint     string            `json:"secretHint"`
-	AccessToken    string            `json:"accessToken,omitempty"`
-	APIKeyToken    string            `json:"apiKeyToken,omitempty"`
-	Code           string            `json:"code,omitempty"`
-	State          string            `json:"state,omitempty"`
-	CodeVerifier   string            `json:"codeVerifier,omitempty"`
-	RefreshToken   string            `json:"refreshToken,omitempty"`
-	IDToken        string            `json:"idToken,omitempty"`
-	TokenType      string            `json:"tokenType,omitempty"`
-	ExpiresIn      string            `json:"expiresIn,omitempty"`
-	Scope          string            `json:"scope,omitempty"`
-	ExchangeError  string            `json:"exchangeError,omitempty"`
-	APIKeyError    string            `json:"apiKeyError,omitempty"`
-	HasAccessToken bool              `json:"hasAccessToken"`
-	HasAPIKeyToken bool              `json:"hasApiKeyToken"`
-	Params         map[string]string `json:"params"`
-}
-
-type openAIOAuthTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    any    `json:"expires_in"`
-	Scope        string `json:"scope"`
-}
-
-type openAIOAuthAPIKeyTokenResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   any    `json:"expires_in"`
-	Scope       string `json:"scope"`
+	Guid string `json:"guid"`
 }
 
 type RefreshUsageResult struct {
 	AccountGuid string                 `json:"accountGuid"`
-	Provider    string                 `json:"provider"`
 	UsageType   string                 `json:"usageType"`
 	Quotas      []domains.AccountQuota `json:"quotas"`
-	Raw         any                    `json:"raw"`
+	PlanType    string                 `json:"planType"`
+	Raw         any                    `json:"raw,omitempty"`
 }
 
 type AccountListItem struct {
 	domains.Account
-	Quotas []domains.AccountQuota `json:"quotas"`
+	Quotas              []domains.AccountQuota `json:"quotas"`
+	AvailableModelCount int64                  `json:"availableModelCount"`
 }
 
 type UsageRefreshSweepResult struct {
@@ -139,117 +109,251 @@ type UsageRefreshSweepResult struct {
 	Failed  int `json:"failed"`
 }
 
-func (s AccountService) Create(input CreateAccountInput) (domains.Account, error) {
-	if input.Name == "" {
-		return domains.Account{}, errors.New("name is required")
-	}
-	if input.Secret == "" {
-		return domains.Account{}, errors.New("secret is required")
-	}
-	normalizeAccountProviderConfig(&input)
-	if err := validateOfficialAccountProvider(input.Provider, input.APIBaseURL); err != nil {
+// ModelSyncInput 指定同步单个账号或某一官方产品；全部为空时同步所有启用账号。
+type ModelSyncInput struct {
+	AccountGuid string `json:"accountGuid"`
+	VendorCode  string `json:"vendorCode"`
+	ProductCode string `json:"productCode"`
+}
+
+// ModelSyncSweepResult 汇总一个或多个账号的模型目录同步结果。
+type ModelSyncSweepResult struct {
+	Checked int              `json:"checked"`
+	Updated int              `json:"updated"`
+	Failed  int              `json:"failed"`
+	Results []ModelSyncStats `json:"results"`
+	Errors  []string         `json:"errors,omitempty"`
+}
+
+// Import 创建或更新一个规范 OAuth 账号文件。相同 ChatGPT Account ID 会更新原账号，而不是重复入池。
+func (s AccountService) Import(input ImportAccountInput) (domains.Account, error) {
+	raw, err := normalizeAccountFileJSON(input.AccountFile)
+	if err != nil {
 		return domains.Account{}, err
 	}
-	if input.AuthType == "" {
-		input.AuthType = domains.AuthTypeBearerToken
+	file, err := codexauth.ParseAccountFile(raw)
+	if err != nil {
+		return domains.Account{}, fmt.Errorf("invalid OAuth account file: %w", err)
 	}
-	normalizeAccountUsageConfig(&input)
+	return s.upsertOfficialAccount(file, AccountPoolInput{
+		VendorCode: input.VendorCode, Name: input.Name, AccountGroup: input.AccountGroup,
+		Priority: input.Priority, Weight: input.Weight, Remark: input.Remark,
+	}, "account.import")
+}
+
+// AddManual 使用手动填写的 OAuth Token 创建或更新官方账号。
+func (s AccountService) AddManual(ctx context.Context, input ManualAccountInput) (domains.Account, error) {
+	pool, err := normalizeOpenAICodexPool(input.AccountPoolInput)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	accessToken := strings.TrimSpace(input.AccessToken)
+	refreshToken := strings.TrimSpace(input.RefreshToken)
+	if accessToken == "" && refreshToken == "" {
+		return domains.Account{}, errors.New("accessToken or refreshToken is required")
+	}
+	tokens := codexauth.TokenSet{
+		AccessToken: accessToken, RefreshToken: refreshToken, IDToken: strings.TrimSpace(input.IDToken),
+	}
+	if accessToken == "" {
+		refreshed, err := refreshManualTokens(ctx, refreshToken)
+		if err != nil {
+			return domains.Account{}, fmt.Errorf("refresh OAuth token: %w", err)
+		}
+		tokens = *refreshed
+		tokens.RefreshToken = tokens.EffectiveRefreshToken(refreshToken)
+	}
+	file, err := codexauth.NewAccountFile(tokens, strings.TrimSpace(input.AccountID))
+	if err != nil {
+		return domains.Account{}, fmt.Errorf("invalid OAuth credentials: %w", err)
+	}
+	if file.NeedsRefresh(time.Now(), tokenRefreshSkew) {
+		if refreshToken == "" {
+			return domains.Account{}, errors.New("accessToken is expired or about to expire and refreshToken is required")
+		}
+		refreshed, refreshErr := refreshManualTokens(ctx, refreshToken)
+		if refreshErr != nil {
+			return domains.Account{}, fmt.Errorf("refresh OAuth token: %w", refreshErr)
+		}
+		if err := file.ApplyTokenSet(*refreshed); err != nil {
+			return domains.Account{}, err
+		}
+	}
+	return s.upsertOfficialAccount(file, pool, "account.manual")
+}
+
+func normalizeOpenAICodexPool(pool AccountPoolInput) (AccountPoolInput, error) {
+	vendorCode, productCode, err := normalizeOfficialAccountIdentity(pool.VendorCode)
+	if err != nil {
+		return AccountPoolInput{}, err
+	}
+	if vendorCode != domains.VendorOpenAI || productCode != domains.ProductCodex {
+		return AccountPoolInput{}, errors.New("current OAuth login only supports official OpenAI Codex accounts")
+	}
+	pool.VendorCode = vendorCode
+	return pool, nil
+}
+
+func refreshManualTokens(ctx context.Context, refreshToken string) (*codexauth.TokenSet, error) {
+	httpClient, err := UpstreamHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+	return codexauth.NewOAuthClient(codexauth.WithHTTPClient(httpClient)).Refresh(ctx, refreshToken)
+}
+
+func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool AccountPoolInput, auditAction string) (domains.Account, error) {
+	if file == nil {
+		return domains.Account{}, errors.New("OAuth account file is required")
+	}
+	if err := file.Normalize(); err != nil {
+		return domains.Account{}, err
+	}
+	vendorCode, productCode, err := normalizeOfficialAccountIdentity(pool.VendorCode)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	encoded, err := file.Marshal()
+	if err != nil {
+		return domains.Account{}, err
+	}
+	encrypted, err := encryptAccountFile(encoded)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	metadata := accountMetadata(file)
+	name := strings.TrimSpace(pool.Name)
+	if name == "" {
+		name = metadata.name
+	}
+	if pool.Weight <= 0 {
+		pool.Weight = 1
+	}
+	group := normalizeAccountGroupName(pool.AccountGroup)
+	var existing domains.Account
+	findErr := global.NAV_DB.Where(
+		"vendor_code = ? AND product_code = ? AND chat_gpt_account_id = ?",
+		vendorCode, productCode, file.Tokens.AccountID,
+	).First(&existing).Error
+	if findErr == nil {
+		updates := metadata.updates()
+		updates["vendor_code"] = vendorCode
+		updates["product_code"] = productCode
+		updates["credential_type"] = domains.CredentialOAuth
+		updates["name"] = name
+		updates["encrypted_account_file"] = encrypted
+		updates["credential_hint"] = accountCredentialHint(file.Tokens.AccountID)
+		updates["account_group"] = group
+		updates["priority"] = pool.Priority
+		updates["weight"] = pool.Weight
+		updates["remark"] = pool.Remark
+		updates["enabled"] = true
+		updates["status"] = domains.AccountStatusAvailable
+		updates["last_error"] = ""
+		if err := global.NAV_DB.Model(&existing).Updates(updates).Error; err != nil {
+			return domains.Account{}, err
+		}
+		AccountGroupServiceApp.RefreshSummaries(existing.AccountGroup, group)
+		AuditServiceApp.Record("", auditAction+".update", "account", existing.Guid, nil)
+		return s.GetByGuid(existing.Guid)
+	}
+	if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+		return domains.Account{}, findErr
+	}
+	account := domains.Account{
+		VendorCode: vendorCode, ProductCode: productCode, CredentialType: domains.CredentialOAuth,
+		Name: name, Email: metadata.email, ChatGPTAccountID: file.Tokens.AccountID,
+		WorkspaceID: file.Meta.WorkspaceID, EncryptedAccountFile: encrypted,
+		CredentialHint: accountCredentialHint(file.Tokens.AccountID), PlanType: file.Meta.PlanType,
+		SubscriptionPlan: file.Meta.SubscriptionPlan, SubscriptionExpiredAt: normalizeUnixMillis(file.Meta.SubscriptionExpiresAt),
+		SubscriptionRenewsAt: normalizeUnixMillis(file.Meta.SubscriptionRenewsAt), SubscriptionWillRenew: file.Meta.SubscriptionWillRenew,
+		AccessTokenExpiresAt: metadata.accessTokenExpiresAt, TokenStatus: metadata.tokenStatus,
+		AccountGroup: group, Status: domains.AccountStatusAvailable,
+		Priority: pool.Priority, Weight: pool.Weight, Enabled: true, Remark: pool.Remark,
+	}
+	if err := global.NAV_DB.Create(&account).Error; err != nil {
+		return domains.Account{}, err
+	}
+	AccountGroupServiceApp.RefreshSummaries(group)
+	AuditServiceApp.Record("", auditAction, "account", account.Guid, map[string]string{"accountId": account.ChatGPTAccountID})
+	return account, nil
+}
+
+// SyncOfficialAccountAsync 在账号入池后异步同步额度、订阅和官方模型目录。
+func (s AccountService) SyncOfficialAccountAsync(guid string) {
+	go func() {
+		if _, err := s.RefreshUsage(guid); err != nil {
+			global.NAV_LOG.Warn("sync added account usage failed", zap.String("accountGuid", guid), zap.Error(err))
+		}
+		if _, err := s.FetchModels(FetchAccountModelsInput{Guid: guid}); err != nil {
+			global.NAV_LOG.Warn("sync added account models failed", zap.String("accountGuid", guid), zap.Error(err))
+		}
+	}()
+}
+
+func (s AccountService) Update(guid string, input UpdateAccountInput) (domains.Account, error) {
+	account, err := s.GetByGuid(guid)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	requestedVendor := strings.TrimSpace(input.VendorCode)
+	if requestedVendor == "" {
+		requestedVendor = account.VendorCode
+	}
+	vendorCode, productCode, err := normalizeOfficialAccountIdentity(requestedVendor)
+	if err != nil {
+		return domains.Account{}, err
+	}
 	if input.Weight <= 0 {
 		input.Weight = 1
 	}
 	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
-	utils.SetSecretKeyFile(Config().SecretKeyFile)
-	encrypted, err := utils.EncryptSecret(input.Secret)
-	if err != nil {
-		return domains.Account{}, err
+	if strings.TrimSpace(input.Name) == "" {
+		input.Name = account.Name
 	}
-	account := domains.Account{
-		Name:                  input.Name,
-		Email:                 input.Email,
-		Provider:              input.Provider,
-		APIBaseURL:            strings.TrimSpace(input.APIBaseURL),
-		SupplierName:          strings.TrimSpace(input.SupplierName),
-		OfficialURL:           strings.TrimSpace(input.OfficialURL),
-		UsageQueryType:        strings.TrimSpace(input.UsageQueryType),
-		UsageAPIURL:           strings.TrimSpace(input.UsageAPIURL),
-		AccountType:           input.AccountType,
-		AuthType:              input.AuthType,
-		EncryptedSecret:       encrypted,
-		SecretHint:            utils.SecretHint(input.Secret),
-		SupportedModels:       input.SupportedModels,
-		AccountGroup:          input.AccountGroup,
-		Status:                domains.AccountStatusAvailable,
-		Priority:              input.Priority,
-		Weight:                input.Weight,
-		Enabled:               true,
-		SubscriptionExpiredAt: input.SubscriptionExpiredAt,
-		Remark:                input.Remark,
-	}
-	err = global.NAV_DB.Create(&account).Error
-	if err == nil {
-		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	}
-	AuditServiceApp.Record("", "account.create", "account", account.Guid, map[string]string{"name": account.Name})
-	return account, err
-}
-
-func (s AccountService) Update(guid string, input CreateAccountInput) (domains.Account, error) {
-	var account domains.Account
-	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
-		return domains.Account{}, err
-	}
-	normalizeAccountProviderConfig(&input)
-	if err := validateOfficialAccountProvider(input.Provider, input.APIBaseURL); err != nil {
-		return domains.Account{}, err
-	}
-	normalizeAccountUsageConfig(&input)
-	input.AccountGroup = normalizeAccountGroupName(input.AccountGroup)
-	updates := map[string]any{
-		"name":                    input.Name,
-		"email":                   input.Email,
-		"provider":                input.Provider,
-		"api_base_url":            strings.TrimSpace(input.APIBaseURL),
-		"supplier_name":           strings.TrimSpace(input.SupplierName),
-		"official_url":            strings.TrimSpace(input.OfficialURL),
-		"usage_query_type":        strings.TrimSpace(input.UsageQueryType),
-		"usage_api_url":           strings.TrimSpace(input.UsageAPIURL),
-		"account_type":            input.AccountType,
-		"auth_type":               input.AuthType,
-		"supported_models":        input.SupportedModels,
-		"account_group":           input.AccountGroup,
-		"priority":                input.Priority,
-		"weight":                  input.Weight,
-		"subscription_expired_at": input.SubscriptionExpiredAt,
-		"remark":                  input.Remark,
-	}
-	if input.Secret != "" {
-		utils.SetSecretKeyFile(Config().SecretKeyFile)
-		encrypted, err := utils.EncryptSecret(input.Secret)
-		if err != nil {
-			return domains.Account{}, err
-		}
-		updates["encrypted_secret"] = encrypted
-		updates["secret_hint"] = utils.SecretHint(input.Secret)
-	}
-	if input.Weight <= 0 {
-		updates["weight"] = 1
-	}
-	if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
+	if err := global.NAV_DB.Model(&account).Updates(map[string]any{
+		"name":          input.Name,
+		"vendor_code":   vendorCode,
+		"product_code":  productCode,
+		"account_group": input.AccountGroup, "priority": input.Priority,
+		"weight": input.Weight, "remark": input.Remark,
+	}).Error; err != nil {
 		return domains.Account{}, err
 	}
 	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup, input.AccountGroup)
 	AuditServiceApp.Record("", "account.update", "account", guid, nil)
-	return s.Get(guid)
+	return s.GetByGuid(guid)
+}
+
+func (s AccountService) Export(guid string) ([]byte, domains.Account, error) {
+	account, err := s.GetByGuid(guid)
+	if err != nil {
+		return nil, domains.Account{}, err
+	}
+	file, err := s.LoadAccountFile(account)
+	if err != nil {
+		return nil, domains.Account{}, err
+	}
+	file.Meta.Label = firstNonEmpty(account.Email, account.Name, file.Meta.Label)
+	file.Meta.ChatGPTAccountID = account.ChatGPTAccountID
+	file.Meta.WorkspaceID = account.WorkspaceID
+	file.Meta.PlanType = account.PlanType
+	file.Meta.SubscriptionPlan = account.SubscriptionPlan
+	file.Meta.SubscriptionExpiresAt = account.SubscriptionExpiredAt
+	file.Meta.SubscriptionRenewsAt = account.SubscriptionRenewsAt
+	file.Meta.SubscriptionWillRenew = account.SubscriptionWillRenew
+	file.Meta.ExportedAt = time.Now().UnixMilli()
+	encoded, err := file.Marshal()
+	if err == nil {
+		AuditServiceApp.Record("", "account.export", "account", guid, nil)
+	}
+	return encoded, account, err
 }
 
 func (s AccountService) GetByGuid(guid string) (domains.Account, error) {
 	var account domains.Account
 	err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error
 	return account, err
-}
-
-func (s AccountService) Get(guid string) (domains.Account, error) {
-	return s.GetByGuid(guid)
 }
 
 func (s AccountService) List(params map[string]string) (list interface{}, total int64, err error) {
@@ -260,18 +364,18 @@ func (s AccountService) List(params map[string]string) (list interface{}, total 
 	if params["enabled"] != "" {
 		db = db.Where("enabled = ?", params["enabled"])
 	}
-	if params["provider"] != "" {
-		db = db.Where("provider = ?", params["provider"])
-	}
 	if params["accountGroup"] != "" {
 		db = db.Where("account_group = ?", params["accountGroup"])
 	}
 	if params["status"] != "" {
 		db = db.Where("status = ?", params["status"])
 	}
+	if vendorCode := strings.TrimSpace(params["vendorCode"]); vendorCode != "" {
+		db = db.Where("vendor_code = ?", strings.ToLower(vendorCode))
+	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("name LIKE ? OR email LIKE ? OR provider LIKE ? OR supplier_name LIKE ?", like, like, like, like)
+		db = db.Where("name LIKE ? OR email LIKE ? OR chat_gpt_account_id LIKE ? OR remark LIKE ?", like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -279,8 +383,20 @@ func (s AccountService) List(params map[string]string) (list interface{}, total 
 	if err = db.Order("priority asc, id desc").Limit(limit).Offset(offset).Find(&results).Error; err != nil {
 		return nil, 0, err
 	}
-	items := attachAccountQuotas(results)
-	return items, total, nil
+	return attachAccountQuotas(results), total, nil
+}
+
+func normalizeOfficialAccountIdentity(vendorCode string) (string, string, error) {
+	switch strings.ToLower(strings.TrimSpace(vendorCode)) {
+	case "", domains.VendorOpenAI:
+		return domains.VendorOpenAI, domains.ProductCodex, nil
+	case domains.VendorGoogle:
+		return domains.VendorGoogle, domains.ProductGemini, nil
+	case domains.VendorAnthropic:
+		return domains.VendorAnthropic, domains.ProductClaudeCode, nil
+	default:
+		return "", "", fmt.Errorf("unsupported official account type: %s", vendorCode)
+	}
 }
 
 func (s AccountService) ListAll() ([]domains.Account, error) {
@@ -299,445 +415,286 @@ func attachAccountQuotas(accounts []domains.Account) []AccountListItem {
 		guids = append(guids, account.Guid)
 	}
 	var quotas []domains.AccountQuota
-	_ = global.NAV_DB.Where("account_guid IN ?", guids).Order("window_type asc, id asc").Find(&quotas).Error
-	quotaByAccount := map[string][]domains.AccountQuota{}
+	_ = global.NAV_DB.Where("account_guid IN ?", guids).Order("window_type asc").Find(&quotas).Error
+	byAccount := map[string][]domains.AccountQuota{}
 	for _, quota := range quotas {
-		quotaByAccount[quota.AccountGuid] = append(quotaByAccount[quota.AccountGuid], quota)
+		byAccount[quota.AccountGuid] = append(byAccount[quota.AccountGuid], quota)
+	}
+	type modelCountRow struct {
+		AccountGuid string
+		Count       int64
+	}
+	var modelCounts []modelCountRow
+	_ = global.NAV_DB.Model(&domains.AccountModelAvailability{}).
+		Select("account_guid, COUNT(*) AS count").
+		Where("account_guid IN ? AND available = ?", guids, true).
+		Group("account_guid").Scan(&modelCounts).Error
+	countByAccount := map[string]int64{}
+	for _, count := range modelCounts {
+		countByAccount[count.AccountGuid] = count.Count
 	}
 	for _, account := range accounts {
 		items = append(items, AccountListItem{
-			Account: account,
-			Quotas:  quotaByAccount[account.Guid],
+			Account: account, Quotas: byAccount[account.Guid], AvailableModelCount: countByAccount[account.Guid],
 		})
 	}
 	return items
 }
 
 func (s AccountService) DeleteByGuid(guid string) error {
-	var account domains.Account
-	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
-	err := global.NAV_DB.Where("guid = ?", guid).Delete(&domains.Account{}).Error
-	if err == nil && account.Guid != "" {
+	account, _ := s.GetByGuid(guid)
+	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountQuota{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountModelAvailability{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("guid = ?", guid).Delete(&domains.Account{}).Error
+	})
+	if err == nil {
 		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
 	}
 	AuditServiceApp.Record("", "account.delete", "account", guid, nil)
 	return err
 }
 
-func (s AccountService) Delete(guid string) error {
-	return s.DeleteByGuid(guid)
+func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, error) {
+	result, err := s.syncAccountModels(strings.TrimSpace(input.Guid))
+	return result.Models, err
 }
 
-func (s AccountService) Refresh(guid string) (domains.Account, error) {
-	now := time.Now().UnixMilli()
-	updates := map[string]any{
-		"last_refreshed_at": now,
-	}
-	var account domains.Account
-	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
-		return domains.Account{}, err
-	}
-	_ = QuotaServiceApp.RefreshExpiredWindows(guid)
-	blocked, err := QuotaServiceApp.HasBlockingQuota(guid)
-	if err != nil {
-		return domains.Account{}, err
-	}
-	if account.Enabled && blocked {
-		updates["status"] = domains.AccountStatusExhausted
-		updates["cooldown_until"] = int64(0)
-	} else if account.Enabled && (account.Status == "" || account.Status == domains.AccountStatusUnknown || account.Status == domains.AccountStatusLimited || account.Status == domains.AccountStatusCooldown) {
-		updates["status"] = domains.AccountStatusAvailable
-		updates["cooldown_until"] = int64(0)
-	}
-	if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
-		return domains.Account{}, err
-	}
-	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	AuditServiceApp.Record("", "account.refresh", "account", guid, nil)
-	return s.GetByGuid(guid)
-}
-
-func (s AccountService) Test(guid string, input AccountTestInput) (map[string]any, error) {
-	account, err := s.GetByGuid(guid)
-	if err != nil {
-		return nil, err
-	}
-	if !strings.EqualFold(strings.TrimSpace(account.Provider), "openai") {
-		return nil, fmt.Errorf("account provider %q is no longer supported", account.Provider)
-	}
-	secret, err := s.DecryptSecret(account)
-	if err != nil {
-		return nil, err
-	}
-	result := map[string]any{
-		"ok":          secret != "",
-		"provider":    account.Provider,
-		"status":      account.Status,
-		"secretHint":  account.SecretHint,
-		"enabled":     account.Enabled,
-		"modelCount":  len(parseSupportedModels(account.SupportedModels)),
-		"checkedAtMs": time.Now().UnixMilli(),
-		"mode":        "basic",
-		"message":     "Secret 解密成功，未填写模型，未发起上游请求",
-	}
-	if input.Model == "" {
-		if firstModel := firstSupportedModel(account.SupportedModels); firstModel != "" {
-			input.Model = firstModel
-			result["mode"] = "upstream"
-			result["message"] = "已使用账号支持的第一个模型发起上游测试"
-		} else {
-			return result, nil
-		}
-	} else {
-		result["mode"] = "upstream"
-		result["message"] = "已按指定模型发起上游测试"
-	}
-	model, err := ModelServiceApp.Find(input.Model)
-	if err != nil {
-		if err.Error() != domains.ErrorModelNotSupported {
-			return nil, err
-		}
-		if !supportsModel(account.SupportedModels, input.Model) {
-			return nil, err
-		}
-		model = domains.ModelMapping{
-			PublicModel:   input.Model,
-			UpstreamModel: input.Model,
-			Provider:      account.Provider,
-			AccountGroup:  account.AccountGroup,
-			Stream:        true,
-			TimeoutSec:    int(Config().RequestTimeoutSeconds),
-		}
-	}
-	if model.Provider != "" && model.Provider != account.Provider {
-		return nil, errors.New("model provider does not match account provider")
-	}
-	prompt := input.Prompt
-	if prompt == "" {
-		prompt = "ping"
-	}
-	body, err := json.Marshal(map[string]any{
-		"model": model.PublicModel,
-		"input": prompt,
-		"store": false,
+func (s AccountService) syncAccountModels(accountGuid string) (ModelSyncStats, error) {
+	value, err, _ := accountModelSyncGroup.Do(accountGuid, func() (any, error) {
+		return s.syncAccountModelsOnce(accountGuid)
 	})
 	if err != nil {
-		return nil, err
+		return ModelSyncStats{}, err
 	}
-	startedAt := time.Now()
+	return value.(ModelSyncStats), nil
+}
+
+func (s AccountService) syncAccountModelsOnce(accountGuid string) (ModelSyncStats, error) {
+	account, err := s.GetByGuid(accountGuid)
+	if err != nil {
+		return ModelSyncStats{}, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
-	proxyResult, err := ProxyAPIClientApp.Do(ctx, ProxyProviderConfig{
-		Name: "openai",
-	}, ProxyCredential{Type: account.AuthType, Value: secret}, ProxyRequest{
-		Endpoint: "/v1/responses",
-		Model:    model.UpstreamModel,
-		Body:     body,
-	})
+	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
-		errorType := classifyError(err)
-		result["upstreamStatusCode"] = 0
-		result["upstreamErrorType"] = errorType
-		result["latencyMs"] = time.Since(startedAt).Milliseconds()
-		result["ok"] = false
-		result["message"] = "上游测试失败"
-		QuotaServiceApp.ApplyQuotaError(account.Guid, errorType)
-		if updated, markErr := s.MarkTestFailure(account.Guid, errorType); markErr == nil {
-			result["status"] = updated.Status
-		}
-		return result, nil
+		return ModelSyncStats{}, err
 	}
-	result["upstreamStatusCode"] = proxyResult.StatusCode
-	result["upstreamErrorType"] = proxyResult.ErrorType
-	result["latencyMs"] = proxyResult.LatencyMs
-	result["ok"] = proxyResult.StatusCode >= 200 && proxyResult.StatusCode < 300 && proxyResult.ErrorType == ""
-	result["model"] = model.PublicModel
-	result["upstreamModel"] = model.UpstreamModel
-	if proxyResult.ErrorType != "" {
-		result["message"] = "上游返回错误"
-		QuotaServiceApp.ApplyQuotaError(account.Guid, proxyResult.ErrorType)
-		if updated, markErr := s.MarkTestFailure(account.Guid, proxyResult.ErrorType); markErr == nil {
-			result["status"] = updated.Status
+	identity, models, err := s.fetchModelsWithFile(ctx, account, file)
+	if isChatGPTUnauthorized(err) {
+		if file, refreshErr := s.ActiveAccountFile(ctx, account, true); refreshErr == nil {
+			identity, models, err = s.fetchModelsWithFile(ctx, account, file)
 		}
-	} else {
-		result["message"] = "上游测试通过"
-		_ = s.MarkUsed(account.Guid)
-		if updated, getErr := s.GetByGuid(account.Guid); getErr == nil {
-			result["status"] = updated.Status
-		}
+	}
+	if err != nil {
+		ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
+		return ModelSyncStats{}, err
+	}
+	result, err := ModelServiceApp.SyncRemoteModels(account, identity, models)
+	if err != nil {
+		ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
+		return ModelSyncStats{}, err
 	}
 	return result, nil
 }
 
-func (s AccountService) FetchModels(input FetchAccountModelsInput) ([]string, error) {
-	if provider := strings.ToLower(strings.TrimSpace(input.Provider)); provider != "" && provider != "openai" {
-		return nil, fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", input.Provider)
+func (s AccountService) fetchModelsWithFile(ctx context.Context, account domains.Account, file *codexauth.AccountFile) (catalog.SourceIdentity, []catalog.RemoteModel, error) {
+	client, err := chatGPTClient(file)
+	if err != nil {
+		return catalog.SourceIdentity{}, nil, err
 	}
-	secret := strings.TrimSpace(input.Secret)
-	var account domains.Account
-	if secret == "" {
-		guid := strings.TrimSpace(input.Guid)
-		if guid == "" {
-			return nil, errors.New("secret is required")
-		}
-		if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
-			return nil, err
-		}
-		if !strings.EqualFold(strings.TrimSpace(account.Provider), "openai") {
-			return nil, fmt.Errorf("account provider %q is no longer supported", account.Provider)
-		}
-		decrypted, err := s.DecryptSecret(account)
+	// 客户端兼容版本由 proxy-api-lib 统一维护，业务层不绑定 Codex 私有协议版本。
+	source := client.Codex.CatalogSource(accountRouteID(account, file), "")
+	models, err := source.ListModels(ctx)
+	return source.Identity(), models, err
+}
+
+// SyncModels 同步单个账号或全部启用官方账号的模型目录。
+func (s AccountService) SyncModels(input ModelSyncInput) (ModelSyncSweepResult, error) {
+	var accounts []domains.Account
+	query := global.NAV_DB.Where("enabled = ? AND encrypted_account_file <> ?", true, "")
+	if guid := strings.TrimSpace(input.AccountGuid); guid != "" {
+		query = global.NAV_DB.Where("guid = ?", guid)
+	}
+	if vendor := strings.TrimSpace(input.VendorCode); vendor != "" {
+		query = query.Where("vendor_code = ?", vendor)
+	}
+	if product := strings.TrimSpace(input.ProductCode); product != "" {
+		query = query.Where("product_code = ?", product)
+	}
+	if err := query.Order("priority asc, id asc").Find(&accounts).Error; err != nil {
+		return ModelSyncSweepResult{}, err
+	}
+	result := ModelSyncSweepResult{Results: make([]ModelSyncStats, 0, len(accounts))}
+	for _, account := range accounts {
+		result.Checked++
+		stats, err := s.syncAccountModels(account.Guid)
 		if err != nil {
-			return nil, err
+			result.Failed++
+			result.Errors = append(result.Errors, account.Guid+": "+err.Error())
+			continue
 		}
-		secret = strings.TrimSpace(decrypted)
-		if secret == "" {
-			return nil, errors.New("secret is required")
-		}
+		result.Updated++
+		result.Results = append(result.Results, stats)
 	}
-	authType := input.AuthType
-	if authType == "" {
-		authType = account.AuthType
-		if authType == "" {
-			authType = domains.AuthTypeBearerToken
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	client, err := newProxyClient(ProxyCredential{Type: authType, Value: secret})
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Models.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	models := make([]string, 0, len(resp.Data))
-	for _, model := range resp.Data {
-		if id := strings.TrimSpace(model.ID); id != "" {
-			models = append(models, id)
-		}
-	}
-	if len(models) == 0 {
-		return nil, errors.New("no models found in upstream response")
-	}
-	sort.Strings(models)
-	return models, nil
-}
-
-func (s AccountService) ParseLoginCallback(input LoginCallbackParseInput) (LoginCallbackParseResult, error) {
-	provider := strings.ToLower(strings.TrimSpace(input.Provider))
-	if provider == "" {
-		provider = "openai"
-	}
-	if provider != "openai" {
-		return LoginCallbackParseResult{}, fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", input.Provider)
-	}
-	rawURL := strings.TrimSpace(input.CallbackURL)
-	if rawURL == "" {
-		return LoginCallbackParseResult{}, errors.New("callbackUrl is required")
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return LoginCallbackParseResult{}, err
-	}
-	params := map[string]string{}
-	collectValues(params, parsed.Query())
-	if parsed.Fragment != "" {
-		fragmentValues, _ := url.ParseQuery(parsed.Fragment)
-		collectValues(params, fragmentValues)
-	}
-	accessToken := firstNonEmpty(params["access_token"], params["token"], params["id_token"])
-	code := params["code"]
-	state := params["state"]
-	if accessToken == "" && code == "" && state == "" {
-		return LoginCallbackParseResult{}, errors.New("callback url does not contain access_token, code or state")
-	}
-	tokenType := params["token_type"]
-	expiresIn := params["expires_in"]
-	scope := firstNonEmpty(params["scope"], openAIOAuthDefaultScope)
-	codeVerifier := strings.TrimSpace(input.CodeVerifier)
-	refreshToken := ""
-	idToken := ""
-	apiKeyToken := ""
-	exchangeError := ""
-	apiKeyError := ""
-	if accessToken == "" && code != "" {
-		if codeVerifier == "" {
-			exchangeError = "missing code_verifier"
-		} else {
-			tokenResp, err := exchangeOpenAIOAuthCode(code, codeVerifier, strings.TrimSpace(input.RedirectURI))
-			if err != nil {
-				exchangeError = err.Error()
-			} else {
-				accessToken = strings.TrimSpace(tokenResp.AccessToken)
-				refreshToken = strings.TrimSpace(tokenResp.RefreshToken)
-				idToken = strings.TrimSpace(tokenResp.IDToken)
-				tokenType = firstNonEmpty(tokenResp.TokenType, tokenType)
-				expiresIn = firstNonEmpty(tokenExpiresInString(tokenResp.ExpiresIn), expiresIn)
-				scope = firstNonEmpty(tokenResp.Scope, scope)
-			}
-		}
-	}
-	if idToken != "" {
-		apiKeyResp, err := exchangeOpenAIOAuthAPIKeyToken(idToken)
-		if err != nil {
-			apiKeyError = err.Error()
-		} else {
-			apiKeyToken = strings.TrimSpace(apiKeyResp.AccessToken)
-		}
-	}
-	secretPayload := map[string]string{
-		"provider":             provider,
-		"access_token":         accessToken,
-		"api_key_access_token": apiKeyToken,
-		"refresh_token":        refreshToken,
-		"id_token":             idToken,
-		"code":                 code,
-		"state":                state,
-		"code_verifier":        codeVerifier,
-		"token_type":           tokenType,
-		"expires_in":           expiresIn,
-		"scope":                scope,
-		"callback_url":         rawURL,
-	}
-	secretRaw, err := json.Marshal(secretPayload)
-	if err != nil {
-		return LoginCallbackParseResult{}, err
-	}
-	secret := string(secretRaw)
-	hintSource := firstNonEmpty(accessToken, code, state, rawURL)
-	return LoginCallbackParseResult{
-		Provider:       provider,
-		AuthType:       domains.AuthTypeLoginCallback,
-		Secret:         secret,
-		SecretHint:     utils.SecretHint(hintSource),
-		AccessToken:    accessToken,
-		APIKeyToken:    apiKeyToken,
-		Code:           code,
-		State:          state,
-		CodeVerifier:   codeVerifier,
-		RefreshToken:   refreshToken,
-		IDToken:        idToken,
-		TokenType:      tokenType,
-		ExpiresIn:      expiresIn,
-		Scope:          scope,
-		ExchangeError:  exchangeError,
-		APIKeyError:    apiKeyError,
-		HasAccessToken: accessToken != "",
-		HasAPIKeyToken: apiKeyToken != "",
-		Params:         params,
-	}, nil
-}
-
-func exchangeOpenAIOAuthCode(code, codeVerifier, redirectURI string) (openAIOAuthTokenResponse, error) {
-	redirectURI = strings.TrimSpace(redirectURI)
-	if redirectURI == "" {
-		redirectURI = openAIOAuthRedirectURI
-	}
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", openAIOAuthClientID)
-	form.Set("code", strings.TrimSpace(code))
-	form.Set("redirect_uri", redirectURI)
-	form.Set("code_verifier", strings.TrimSpace(codeVerifier))
-
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIOAuthTokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return openAIOAuthTokenResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	client, err := UpstreamHTTPClient()
-	if err != nil {
-		return openAIOAuthTokenResponse{}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return openAIOAuthTokenResponse{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return openAIOAuthTokenResponse{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return openAIOAuthTokenResponse{}, fmt.Errorf("oauth token exchange failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var tokenResp openAIOAuthTokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return openAIOAuthTokenResponse{}, err
-	}
-	if strings.TrimSpace(tokenResp.AccessToken) == "" {
-		return openAIOAuthTokenResponse{}, errors.New("oauth token exchange returned empty access_token")
-	}
-	return tokenResp, nil
-}
-
-func exchangeOpenAIOAuthAPIKeyToken(idToken string) (openAIOAuthAPIKeyTokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
-	form.Set("client_id", openAIOAuthClientID)
-	form.Set("requested_token", openAIOAuthAPIKeyToken)
-	form.Set("subject_token", strings.TrimSpace(idToken))
-	form.Set("subject_token_type", "urn:ietf:params:oauth:token-type:id_token")
-
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIOAuthTokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return openAIOAuthAPIKeyTokenResponse{}, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	client, err := UpstreamHTTPClient()
-	if err != nil {
-		return openAIOAuthAPIKeyTokenResponse{}, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return openAIOAuthAPIKeyTokenResponse{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return openAIOAuthAPIKeyTokenResponse{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return openAIOAuthAPIKeyTokenResponse{}, fmt.Errorf("oauth api key token exchange failed: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var tokenResp openAIOAuthAPIKeyTokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return openAIOAuthAPIKeyTokenResponse{}, err
-	}
-	if strings.TrimSpace(tokenResp.AccessToken) == "" {
-		return openAIOAuthAPIKeyTokenResponse{}, errors.New("oauth api key token exchange returned empty access_token")
-	}
-	return tokenResp, nil
-}
-
-func tokenExpiresInString(value any) string {
-	if value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
+	return result, nil
 }
 
 func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
-	account, err := s.Get(guid)
+	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return RefreshUsageResult{}, err
 	}
-	return RefreshUsageResult{
-		AccountGuid: account.Guid,
-		Provider:    "openai",
-	}, errors.New("official OpenAI balance query is not supported; usage is tracked locally")
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	file, err := s.ActiveAccountFile(ctx, account, false)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	usage, err := s.fetchUsageWithFile(ctx, account, file)
+	if isChatGPTUnauthorized(err) {
+		file, err = s.ActiveAccountFile(ctx, account, true)
+		if err == nil {
+			usage, err = s.fetchUsageWithFile(ctx, account, file)
+		}
+	}
+	if err != nil {
+		s.recordSyncFailure(account, err)
+		return RefreshUsageResult{}, err
+	}
+	client, err := chatGPTClient(file)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	subscription, subscriptionErr := client.Accounts.Subscription(ctx, accountRouteID(account, file))
+	quotas, err := QuotaServiceApp.SyncRateLimit(account.Guid, "", "wham", usage.RateLimit, usage.Raw)
+	if err != nil {
+		return RefreshUsageResult{}, err
+	}
+	for _, additional := range usage.AdditionalRateLimits {
+		if additional.RateLimit == nil {
+			continue
+		}
+		items, syncErr := QuotaServiceApp.SyncRateLimit(account.Guid, firstNonEmpty(additional.SourceKey, additional.LimitID, additional.MeteredFeature), "wham", additional.RateLimit, additional.Raw)
+		if syncErr != nil {
+			return RefreshUsageResult{}, syncErr
+		}
+		quotas = append(quotas, items...)
+	}
+	updates := map[string]any{
+		"last_refreshed_at": time.Now().UnixMilli(), "last_error": "", "token_status": domains.TokenStatusActive,
+		"plan_type": firstNonEmpty(usage.PlanType, file.Meta.PlanType, account.PlanType),
+	}
+	if subscriptionErr == nil && subscription != nil {
+		applySubscriptionSnapshot(updates, file, subscription)
+	}
+	blocked, _ := QuotaServiceApp.HasBlockingQuota(account.Guid)
+	if blocked {
+		updates["status"] = domains.AccountStatusExhausted
+	} else if account.Enabled {
+		updates["status"] = domains.AccountStatusAvailable
+		updates["failure_count"] = 0
+		updates["cooldown_until"] = int64(0)
+	}
+	if err := s.persistAccountFile(account, file, updates); err != nil {
+		return RefreshUsageResult{}, err
+	}
+	allQuotas, _ := QuotaServiceApp.ListByAccount(account.Guid)
+	raw := map[string]any{"usage": json.RawMessage(usage.Raw)}
+	if subscriptionErr == nil && subscription != nil {
+		raw["subscription"] = json.RawMessage(subscription.Raw)
+	} else if subscriptionErr != nil {
+		raw["subscriptionWarning"] = subscriptionErr.Error()
+	}
+	return RefreshUsageResult{AccountGuid: account.Guid, UsageType: "wham", Quotas: allQuotas, PlanType: updates["plan_type"].(string), Raw: raw}, nil
+}
+
+func (s AccountService) fetchUsageWithFile(ctx context.Context, account domains.Account, file *codexauth.AccountFile) (*chatgpt.UsageSnapshot, error) {
+	client, err := chatGPTClient(file)
+	if err != nil {
+		return nil, err
+	}
+	return client.Usage.Get(ctx, accountRouteID(account, file))
+}
+
+func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]any, error) {
+	account, err := s.GetByGuid(guid)
+	if err != nil {
+		return nil, err
+	}
+	model := strings.TrimSpace(input.Model)
+	if model == "" {
+		model, _ = ModelServiceApp.FirstAvailableModelForAccount(account.Guid)
+	}
+	if model == "" {
+		models, fetchErr := s.FetchModels(FetchAccountModelsInput{Guid: guid})
+		if fetchErr != nil || len(models) == 0 {
+			return nil, firstError(fetchErr, errors.New("no Codex model is available for probing"))
+		}
+		model = models[0]
+	}
+	prompt := firstNonEmpty(input.Prompt, "Reply with OK.")
+	body, _ := json.Marshal(map[string]any{
+		"model":        model,
+		"instructions": "Reply briefly.",
+		"input": []map[string]any{{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": prompt}},
+		}},
+		"store": false,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	defer cancel()
+	started := time.Now()
+	result, err := ProxyAPIClientApp.Do(ctx, account, ProxyRequest{Endpoint: "/v1/responses", Model: model, Body: body})
+	if err != nil {
+		return nil, err
+	}
+	if _, sampleErr := QuotaServiceApp.SampleHeaders(account.Guid, "active_probe", result.Header); sampleErr != nil {
+		return nil, sampleErr
+	}
+	ok := result.StatusCode >= 200 && result.StatusCode < 300 && result.ErrorType == ""
+	if ok {
+		_ = s.MarkUsed(account.Guid)
+	} else {
+		QuotaServiceApp.ApplyError(account.Guid, result.ErrorType)
+	}
+	quotas, _ := QuotaServiceApp.ListByAccount(account.Guid)
+	return map[string]any{
+		"ok": ok, "model": model, "statusCode": result.StatusCode,
+		"errorType": result.ErrorType, "latencyMs": time.Since(started).Milliseconds(), "quotas": quotas,
+	}, nil
 }
 
 func (s AccountService) RefreshDueUsageAccounts() (UsageRefreshSweepResult, error) {
-	return UsageRefreshSweepResult{}, nil
+	var accounts []domains.Account
+	if err := global.NAV_DB.Where("enabled = ?", true).Order("last_refreshed_at asc").Find(&accounts).Error; err != nil {
+		return UsageRefreshSweepResult{}, err
+	}
+	now := time.Now()
+	interval := time.Duration(Config().QuotaRefreshSeconds) * time.Second
+	if interval <= 0 {
+		interval = 3 * time.Minute
+	}
+	result := UsageRefreshSweepResult{}
+	for _, account := range accounts {
+		jitter := deterministicJitter(account.Guid, interval/5)
+		if account.LastRefreshedAt > 0 && time.UnixMilli(account.LastRefreshedAt).Add(interval+jitter).After(now) {
+			continue
+		}
+		result.Checked++
+		if _, err := s.RefreshUsage(account.Guid); err != nil {
+			result.Failed++
+			continue
+		}
+		result.Updated++
+	}
+	return result, nil
 }
 
 func (s AccountService) Reorder(input ReorderAccountInput) error {
@@ -754,50 +711,36 @@ func (s AccountService) Reorder(input ReorderAccountInput) error {
 				return err
 			}
 		}
-		AuditServiceApp.Record("", "account.reorder", "account", "", map[string]int{"count": len(input.Items)})
 		return nil
 	})
 }
 
 func (s AccountService) SetEnabled(guid string, enabled bool) error {
-	var account domains.Account
-	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
+	account, _ := s.GetByGuid(guid)
 	status := domains.AccountStatusDisabled
 	if enabled {
 		status = domains.AccountStatusAvailable
 	}
-	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
-		"enabled": enabled,
-		"status":  status,
-	}).Error
-	if err == nil && account.Guid != "" {
+	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{"enabled": enabled, "status": status}).Error
+	if err == nil {
 		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
 	}
-	AuditServiceApp.Record("", "account.enabled", "account", guid, map[string]bool{"enabled": enabled})
 	return err
 }
 
 func (s AccountService) MarkUsed(guid string) error {
-	var account domains.Account
-	_ = global.NAV_DB.Where("guid = ?", guid).First(&account).Error
 	status := domains.AccountStatusAvailable
 	if blocked, err := QuotaServiceApp.HasBlockingQuota(guid); err == nil && blocked {
 		status = domains.AccountStatusExhausted
 	}
-	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
-		"last_used_at":  time.Now().UnixMilli(),
-		"failure_count": 0,
-		"status":        status,
+	return global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
+		"last_used_at": time.Now().UnixMilli(), "failure_count": 0, "status": status,
 	}).Error
-	if err == nil && account.Guid != "" {
-		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	}
-	return err
 }
 
 func (s AccountService) MarkFailure(guid, errorType string) error {
-	var account domains.Account
-	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
+	account, err := s.GetByGuid(guid)
+	if err != nil {
 		return err
 	}
 	status := account.Status
@@ -816,88 +759,33 @@ func (s AccountService) MarkFailure(guid, errorType string) error {
 			cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
 		}
 	}
-	err := global.NAV_DB.Model(&account).Updates(map[string]any{
-		"failure_count":  account.FailureCount + 1,
-		"status":         status,
-		"cooldown_until": cooldownUntil,
+	return global.NAV_DB.Model(&account).Updates(map[string]any{
+		"failure_count": account.FailureCount + 1, "status": status, "cooldown_until": cooldownUntil,
 	}).Error
-	if err == nil {
-		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	}
-	return err
-}
-
-func (s AccountService) MarkTestFailure(guid, errorType string) (domains.Account, error) {
-	var account domains.Account
-	if err := global.NAV_DB.Where("guid = ?", guid).First(&account).Error; err != nil {
-		return domains.Account{}, err
-	}
-	status := account.Status
-	cooldownUntil := account.CooldownUntil
-	switch errorType {
-	case domains.ErrorAuthFailed:
-		status = domains.AccountStatusInvalid
-	case domains.ErrorRateLimited:
-		status = domains.AccountStatusLimited
-		cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
-	case domains.ErrorQuotaExhausted:
-		status = domains.AccountStatusExhausted
-	case domains.ErrorUpstream5xx, domains.ErrorNetwork, domains.ErrorUpstreamTimeout:
-		status = domains.AccountStatusCooldown
-		cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
-	default:
-		status = domains.AccountStatusUnknown
-	}
-	if err := global.NAV_DB.Model(&account).Updates(map[string]any{
-		"failure_count":  account.FailureCount + 1,
-		"status":         status,
-		"cooldown_until": cooldownUntil,
-	}).Error; err != nil {
-		return domains.Account{}, err
-	}
-	AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
-	return s.GetByGuid(guid)
 }
 
 func (s AccountService) MarkExpiredSubscriptions() error {
 	now := time.Now().UnixMilli()
 	return global.NAV_DB.Model(&domains.Account{}).
-		Where("enabled = ? AND subscription_expired_at > 0 AND subscription_expired_at <= ?", true, now).
+		Where("enabled = ? AND subscription_will_renew = ? AND subscription_expired_at > 0 AND subscription_expired_at <= ?", true, false, now).
 		Update("status", domains.AccountStatusExpired).Error
 }
 
-func (s AccountService) DecryptSecret(account domains.Account) (string, error) {
-	utils.SetSecretKeyFile(Config().SecretKeyFile)
-	return utils.DecryptSecret(account.EncryptedSecret)
-}
-
-func (s AccountService) FindAvailable(provider, accountGroup, model string, limit int) ([]domains.Account, error) {
+func (s AccountService) FindAvailable(accountGroup, model string, limit int) ([]domains.Account, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	now := time.Now().UnixMilli()
-	query := global.NAV_DB.Where("enabled = ? AND status NOT IN ?", true, []string{
-		domains.AccountStatusDisabled,
-		domains.AccountStatusLimited,
-		domains.AccountStatusCooldown,
-		domains.AccountStatusExpired,
-		domains.AccountStatusInvalid,
-		domains.AccountStatusExhausted,
-	})
-	if strings.TrimSpace(provider) != "" {
-		query = query.Where("provider = ?", strings.TrimSpace(provider))
-	}
-	query = query.Where("(cooldown_until = 0 OR cooldown_until < ?)", now)
-	query = query.Where("(subscription_expired_at = 0 OR subscription_expired_at > ?)", now)
+	query := global.NAV_DB.Where("enabled = ? AND encrypted_account_file <> ? AND status NOT IN ?", true, "", []string{
+		domains.AccountStatusDisabled, domains.AccountStatusLimited, domains.AccountStatusCooldown,
+		domains.AccountStatusExpired, domains.AccountStatusInvalid, domains.AccountStatusExhausted,
+	}).Where("(cooldown_until = 0 OR cooldown_until < ?)", now).
+		Where("(subscription_expired_at = 0 OR subscription_expired_at > ? OR subscription_will_renew = ?)", now, true)
 	if accountGroup != "" {
 		query = query.Where("account_group = ?", accountGroup)
 	}
 	var list []domains.Account
-	err := query.Order("priority asc, last_used_at asc, id asc").Limit(limit).Find(&list).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	if err != nil {
+	if err := query.Order("priority asc, last_used_at asc, id asc").Limit(limit).Find(&list).Error; err != nil {
 		return nil, err
 	}
 	available := make([]domains.Account, 0, len(list))
@@ -906,81 +794,284 @@ func (s AccountService) FindAvailable(provider, accountGroup, model string, limi
 		if err != nil {
 			return nil, err
 		}
-		if blocked {
-			_ = global.NAV_DB.Model(&account).Updates(map[string]any{
-				"status":         domains.AccountStatusExhausted,
-				"cooldown_until": int64(0),
-			}).Error
-			continue
+		if !blocked {
+			available = append(available, account)
 		}
-		available = append(available, account)
 	}
 	return available, nil
 }
 
-func parseSupportedModels(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "*" {
-		return nil
+// LoadAccountFile 解密并解析账号的规范 OAuth 文件。
+func (s AccountService) LoadAccountFile(account domains.Account) (*codexauth.AccountFile, error) {
+	if strings.TrimSpace(account.EncryptedAccountFile) == "" {
+		return nil, errors.New("account does not contain an OAuth account file")
 	}
-	var models []string
-	if err := json.Unmarshal([]byte(raw), &models); err == nil {
-		return models
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	plaintext, err := utils.DecryptSecret(account.EncryptedAccountFile)
+	if err != nil {
+		return nil, err
 	}
-	for _, part := range strings.Split(raw, ",") {
-		if model := strings.TrimSpace(part); model != "" {
-			models = append(models, model)
-		}
-	}
-	return models
+	return codexauth.ParseAccountFile([]byte(plaintext))
 }
 
-func firstSupportedModel(raw string) string {
-	models := parseSupportedModels(raw)
-	if len(models) == 0 {
+// ActiveAccountFile 在必要时刷新 Access Token，并原子保存轮换后的 Refresh Token。
+func (s AccountService) ActiveAccountFile(ctx context.Context, account domains.Account, force bool) (*codexauth.AccountFile, error) {
+	file, err := s.LoadAccountFile(account)
+	if err != nil {
+		return nil, err
+	}
+	if !force && !file.NeedsRefresh(time.Now(), tokenRefreshSkew) {
+		return file, nil
+	}
+	value, err, _ := accountTokenRefreshGroup.Do(account.Guid, func() (any, error) {
+		current, err := s.GetByGuid(account.Guid)
+		if err != nil {
+			return nil, err
+		}
+		currentFile, err := s.LoadAccountFile(current)
+		if err != nil {
+			return nil, err
+		}
+		if !force && !currentFile.NeedsRefresh(time.Now(), tokenRefreshSkew) {
+			return currentFile, nil
+		}
+		if strings.TrimSpace(currentFile.Tokens.RefreshToken) == "" {
+			return nil, errors.New("OAuth account does not contain refresh_token")
+		}
+		httpClient, err := UpstreamHTTPClient()
+		if err != nil {
+			return nil, err
+		}
+		oauth := codexauth.NewOAuthClient(codexauth.WithIssuer(currentFile.Meta.Issuer), codexauth.WithHTTPClient(httpClient))
+		tokens, err := oauth.Refresh(ctx, currentFile.Tokens.RefreshToken)
+		if err != nil {
+			s.recordTokenRefreshFailure(current, err)
+			return nil, err
+		}
+		if err := currentFile.ApplyTokenSet(*tokens); err != nil {
+			return nil, err
+		}
+		metadata := accountMetadata(currentFile)
+		if err := s.persistAccountFile(current, currentFile, metadata.updates()); err != nil {
+			return nil, err
+		}
+		return currentFile, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*codexauth.AccountFile), nil
+}
+
+func (s AccountService) persistAccountFile(account domains.Account, file *codexauth.AccountFile, updates map[string]any) error {
+	encoded, err := file.Marshal()
+	if err != nil {
+		return err
+	}
+	encrypted, err := encryptAccountFile(encoded)
+	if err != nil {
+		return err
+	}
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["encrypted_account_file"] = encrypted
+	return global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", account.Guid).Updates(updates).Error
+}
+
+func (s AccountService) recordTokenRefreshFailure(account domains.Account, err error) {
+	_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+		"token_status": domains.TokenStatusRefreshFailed, "last_error": truncateError(err),
+	}).Error
+}
+
+func (s AccountService) recordSyncFailure(account domains.Account, err error) {
+	_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+		"last_refreshed_at": time.Now().UnixMilli(), "last_error": truncateError(err),
+	}).Error
+}
+
+type normalizedAccountMetadata struct {
+	name, email, tokenStatus string
+	accessTokenExpiresAt     int64
+	file                     *codexauth.AccountFile
+}
+
+func accountMetadata(file *codexauth.AccountFile) normalizedAccountMetadata {
+	label := strings.TrimSpace(file.Meta.Label)
+	name := label
+	email := ""
+	if strings.Contains(label, "@") {
+		email = label
+		name = strings.SplitN(label, "@", 2)[0]
+	}
+	if name == "" {
+		name = file.Tokens.AccountID
+	}
+	expiresAt := int64(0)
+	status := domains.TokenStatusActive
+	if expiry, ok := file.AccessTokenExpiresAt(); ok {
+		expiresAt = expiry.UnixMilli()
+		if !expiry.After(time.Now().Add(tokenRefreshSkew)) {
+			status = domains.TokenStatusRefreshNeeded
+		}
+	}
+	return normalizedAccountMetadata{name: name, email: email, tokenStatus: status, accessTokenExpiresAt: expiresAt, file: file}
+}
+
+func (m normalizedAccountMetadata) updates() map[string]any {
+	return map[string]any{
+		"email": m.email, "chat_gpt_account_id": m.file.Tokens.AccountID, "workspace_id": m.file.Meta.WorkspaceID,
+		"plan_type": m.file.Meta.PlanType, "subscription_plan": m.file.Meta.SubscriptionPlan,
+		"subscription_expired_at": normalizeUnixMillis(m.file.Meta.SubscriptionExpiresAt),
+		"subscription_renews_at":  normalizeUnixMillis(m.file.Meta.SubscriptionRenewsAt),
+		"subscription_will_renew": m.file.Meta.SubscriptionWillRenew,
+		"access_token_expires_at": m.accessTokenExpiresAt, "token_status": m.tokenStatus,
+	}
+}
+
+func chatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {
+	if file == nil || strings.TrimSpace(file.Tokens.AccessToken) == "" {
+		return nil, errors.New("OAuth access token is empty")
+	}
+	httpClient, err := UpstreamHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+	return chatgpt.NewClient(
+		chatgpt.WithHTTPClient(httpClient), chatgpt.WithAccessToken(file.Tokens.AccessToken),
+		chatgpt.WithOriginator(GatewayProxyConfig().Originator), chatgpt.WithUserAgent(chatgpt.DefaultUserAgent),
+	), nil
+}
+
+func accountRouteID(account domains.Account, file *codexauth.AccountFile) string {
+	return firstNonEmpty(account.ChatGPTAccountID, file.Tokens.AccountID, account.WorkspaceID, file.Meta.WorkspaceID)
+}
+
+func isChatGPTUnauthorized(err error) bool {
+	var apiErr *chatgpt.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == 401
+}
+
+func normalizeAccountFileJSON(raw json.RawMessage) ([]byte, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, errors.New("accountFile is required")
+	}
+	if strings.HasPrefix(trimmed, "\"") {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil, err
+		}
+		return []byte(text), nil
+	}
+	return []byte(trimmed), nil
+}
+
+func encryptAccountFile(raw []byte) (string, error) {
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	return utils.EncryptSecret(string(raw))
+}
+
+func accountCredentialHint(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if len(accountID) <= 10 {
+		return accountID
+	}
+	return accountID[:4] + "…" + accountID[len(accountID)-6:]
+}
+
+func normalizeUnixMillis(value int64) int64 {
+	if value > 0 && value < 1_000_000_000_000 {
+		return value * 1000
+	}
+	return value
+}
+
+func timePointerMillis(value *time.Time) int64 {
+	if value == nil || value.IsZero() {
+		return 0
+	}
+	return value.UnixMilli()
+}
+
+func applySubscriptionSnapshot(updates map[string]any, file *codexauth.AccountFile, snapshot *chatgpt.SubscriptionSnapshot) {
+	if updates == nil || file == nil || snapshot == nil {
+		return
+	}
+	planType := firstNonEmpty(snapshot.AccountPlanType, stringUpdate(updates, "plan_type"), file.Meta.PlanType)
+	if planType != "" {
+		updates["plan_type"] = planType
+		file.Meta.PlanType = planType
+	}
+	if subscriptionPlan := strings.TrimSpace(snapshot.SubscriptionPlan); subscriptionPlan != "" {
+		updates["subscription_plan"] = subscriptionPlan
+		file.Meta.SubscriptionPlan = subscriptionPlan
+	}
+	if snapshot.ExpiresAt != nil {
+		expiresAt := timePointerMillis(snapshot.ExpiresAt)
+		updates["subscription_expired_at"] = expiresAt
+		file.Meta.SubscriptionExpiresAt = expiresAt
+	}
+	if snapshot.RenewsAt != nil {
+		renewsAt := timePointerMillis(snapshot.RenewsAt)
+		updates["subscription_renews_at"] = renewsAt
+		file.Meta.SubscriptionRenewsAt = renewsAt
+	}
+	if snapshot.WillRenew != nil {
+		willRenew := *snapshot.WillRenew
+		updates["subscription_will_renew"] = willRenew
+		file.Meta.SubscriptionWillRenew = boolPointer(willRenew)
+	}
+	if snapshot.HasSubscription != nil && !*snapshot.HasSubscription && snapshot.ExpiresAt == nil && snapshot.RenewsAt == nil {
+		updates["subscription_expired_at"] = int64(0)
+		updates["subscription_renews_at"] = int64(0)
+		updates["subscription_will_renew"] = false
+		file.Meta.SubscriptionExpiresAt = 0
+		file.Meta.SubscriptionRenewsAt = 0
+		file.Meta.SubscriptionWillRenew = boolPointer(false)
+	}
+}
+
+func stringUpdate(updates map[string]any, key string) string {
+	value, _ := updates[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func deterministicJitter(key string, maximum time.Duration) time.Duration {
+	if maximum <= 0 {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(key))
+	return time.Duration(hash.Sum64() % uint64(maximum))
+}
+
+func truncateError(err error) string {
+	if err == nil {
 		return ""
 	}
-	return models[0]
+	value := strings.Join(strings.Fields(err.Error()), " ")
+	if len(value) > 500 {
+		value = value[:500]
+	}
+	return value
 }
 
-func validateOfficialAccountProvider(provider, apiBaseURL string) error {
-	if strings.ToLower(strings.TrimSpace(provider)) != "openai" {
-		return fmt.Errorf("unsupported provider %q: only official OpenAI accounts are enabled", provider)
+func firstError(primary, fallback error) error {
+	if primary != nil {
+		return primary
 	}
-	if strings.TrimRight(strings.TrimSpace(apiBaseURL), "/") != proxyapi.DefaultBaseURL {
-		return fmt.Errorf("unsupported OpenAI base URL %q: only %s is enabled", apiBaseURL, proxyapi.DefaultBaseURL)
-	}
-	return nil
-}
-
-func normalizeAccountProviderConfig(input *CreateAccountInput) {
-	provider := strings.ToLower(strings.TrimSpace(input.Provider))
-	if provider == "" {
-		provider = "openai"
-	}
-	input.Provider = provider
-	input.APIBaseURL = proxyapi.DefaultBaseURL
-	input.SupplierName = "OpenAI"
-	input.OfficialURL = "https://openai.com"
-}
-
-func normalizeAccountUsageConfig(input *CreateAccountInput) {
-	input.UsageQueryType = ""
-	input.UsageAPIURL = ""
-}
-
-func collectValues(out map[string]string, values url.Values) {
-	for key, item := range values {
-		if len(item) > 0 && strings.TrimSpace(item[0]) != "" {
-			out[key] = strings.TrimSpace(item[0])
-		}
-	}
+	return fallback
 }
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
+		if value = strings.TrimSpace(value); value != "" {
 			return value
 		}
 	}

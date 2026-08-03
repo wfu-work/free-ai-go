@@ -4,19 +4,22 @@ import common "github.com/wfu-work/nav-common-go-lib/domains"
 
 type Account struct {
 	common.BaseDataEntity
+	VendorCode            string `json:"vendorCode" gorm:"size:40;index;comment:官方厂商标识"`
+	ProductCode           string `json:"productCode" gorm:"size:40;index;comment:官方产品标识"`
+	CredentialType        string `json:"credentialType" gorm:"size:40;index;comment:官方凭据类型"`
 	Name                  string `json:"name" gorm:"size:100;comment:账号名称"`
-	Email                 string `json:"email" gorm:"size:255;index;comment:邮箱或备注"`
-	Provider              string `json:"provider" gorm:"size:40;index;comment:平台"`
-	APIBaseURL            string `json:"apiBaseUrl" gorm:"size:500;comment:API请求地址"`
-	SupplierName          string `json:"supplierName" gorm:"size:120;comment:供应商名称"`
-	OfficialURL           string `json:"officialUrl" gorm:"size:500;comment:官网链接"`
-	UsageQueryType        string `json:"usageQueryType" gorm:"size:40;index;comment:额度查询类型"`
-	UsageAPIURL           string `json:"usageApiUrl" gorm:"size:500;comment:额度查询地址"`
-	AccountType           string `json:"accountType" gorm:"size:40;index;comment:账号类型"`
-	AuthType              string `json:"authType" gorm:"size:40;comment:认证类型"`
-	EncryptedSecret       string `json:"-" gorm:"comment:加密密钥"`
-	SecretHint            string `json:"secretHint" gorm:"size:120;comment:密钥提示"`
-	SupportedModels       string `json:"supportedModels" gorm:"comment:支持模型JSON"`
+	Email                 string `json:"email" gorm:"size:255;index;comment:邮箱"`
+	ChatGPTAccountID      string `json:"chatgptAccountId" gorm:"size:120;index;comment:ChatGPT账号ID"`
+	WorkspaceID           string `json:"workspaceId" gorm:"size:120;index;comment:工作区ID"`
+	EncryptedAccountFile  string `json:"-" gorm:"comment:加密OAuth账号文件"`
+	CredentialHint        string `json:"credentialHint" gorm:"size:120;comment:账号凭据提示"`
+	PlanType              string `json:"planType" gorm:"size:80;index;comment:账号套餐"`
+	SubscriptionPlan      string `json:"subscriptionPlan" gorm:"size:120;comment:订阅套餐"`
+	SubscriptionRenewsAt  int64  `json:"subscriptionRenewsAt" gorm:"comment:订阅续费时间"`
+	SubscriptionWillRenew *bool  `json:"subscriptionWillRenew" gorm:"comment:是否自动续费"`
+	AccessTokenExpiresAt  int64  `json:"accessTokenExpiresAt" gorm:"index;comment:访问令牌过期时间"`
+	TokenStatus           string `json:"tokenStatus" gorm:"size:40;index;comment:令牌状态"`
+	LastError             string `json:"lastError,omitempty" gorm:"comment:最近同步错误"`
 	AccountGroup          string `json:"accountGroup" gorm:"size:80;index;comment:账号分组"`
 	Status                string `json:"status" gorm:"size:40;index;comment:状态"`
 	Priority              int    `json:"priority" gorm:"index;comment:顺序"`

@@ -29,7 +29,7 @@ var fileContentTypeMap = map[string]string{
 	".wasm":     "application/wasm",
 }
 
-func InitStatic(engine *gin.Engine) error {
+func InitStatic(engine *gin.Engine, apiPrefixes ...string) error {
 	return StaticFile(Static(), func(fileMap map[string][]byte) {
 		indexHTML, ok := fileMap["freeai-web/browser/index.html"]
 		if !ok {
@@ -50,9 +50,32 @@ func InitStatic(engine *gin.Engine) error {
 		}
 
 		engine.NoRoute(func(c *gin.Context) {
+			if c.Request.Method != http.MethodGet || matchesPathPrefix(c.Request.URL.Path, apiPrefixes) {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error": gin.H{
+						"message": "route not found",
+						"type":    "invalid_request_error",
+						"code":    "route_not_found",
+					},
+				})
+				return
+			}
 			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 		})
 	})
+}
+
+func matchesPathPrefix(path string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		prefix = "/" + strings.Trim(strings.TrimSpace(prefix), "/")
+		if prefix == "/" {
+			continue
+		}
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func StaticFile(zipFile []byte, callback func(fileMap map[string][]byte)) error {

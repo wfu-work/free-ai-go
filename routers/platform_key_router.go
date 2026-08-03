@@ -12,6 +12,8 @@ func (r PlatformKeyRouter) InitPlatformKeyRouter(group *gin.RouterGroup) {
 	router := group.Group("platform-keys")
 	{
 		routerLogger.POST("", platformKeyApi.Create)
+		routerLogger.POST(":guid/secret", platformKeyApi.GetSecret)
+		routerLogger.POST(":guid/debug", platformKeyApi.Debug)
 		routerLogger.POST("codex-config/preview", platformKeyApi.CodexConfigPreview)
 		routerLogger.POST("codex-config/apply", platformKeyApi.CodexConfigApply)
 		routerLogger.PUT(":guid", platformKeyApi.Update)

@@ -1,6 +1,14 @@
 package apis
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/domains"
@@ -11,6 +19,23 @@ import (
 )
 
 type PlatformKeyApi struct{}
+
+type platformKeyDebugInput struct {
+	Endpoint string          `json:"endpoint"`
+	Payload  json.RawMessage `json:"payload"`
+}
+
+type platformKeyDebugOutput struct {
+	StatusCode  int    `json:"statusCode"`
+	StatusText  string `json:"statusText"`
+	LatencyMs   int64  `json:"latencyMs"`
+	ContentType string `json:"contentType"`
+	Body        string `json:"body"`
+}
+
+type platformKeySecretOutput struct {
+	Key string `json:"key"`
+}
 
 // Create 创建密钥
 // @Summary 创建密钥
@@ -34,6 +59,82 @@ func (a PlatformKeyApi) Create(c *gin.Context) {
 		return
 	}
 	response.Ok(out, c)
+}
+
+// GetSecret 临时读取完整密钥供当前管理员复制，响应禁止缓存。
+// @Router /platform-keys/{guid}/secret [post]
+func (a PlatformKeyApi) GetSecret(c *gin.Context) {
+	secret, err := platformKeyService.GetSecretByGuid(c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	services.AuditServiceApp.Record(
+		"",
+		"platform_key.secret_access",
+		"platform_key",
+		c.Param("guid"),
+		map[string]string{"purpose": "clipboard"},
+	)
+	response.Ok(platformKeySecretOutput{Key: secret}, c)
+}
+
+// Debug 使用服务端保存的完整密钥执行一次公开接口请求。
+// 完整密钥不会返回浏览器，调试结果保持 OpenAI 兼容接口的原始状态和响应体。
+// @Router /platform-keys/{guid}/debug [post]
+func (a PlatformKeyApi) Debug(c *gin.Context) {
+	var input platformKeyDebugInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+
+	method, path, handler, err := resolvePlatformKeyDebugEndpoint(input.Endpoint)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	secret, err := platformKeyService.GetSecretByGuid(c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+
+	startedAt := time.Now()
+	recorder := httptest.NewRecorder()
+	debugContext, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(method, path, bytes.NewReader(input.Payload))
+	request = request.WithContext(c.Request.Context())
+	request.Header.Set("Authorization", "Bearer "+secret)
+	if method == http.MethodPost {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	debugContext.Request = request
+	handler(debugContext)
+
+	statusCode := recorder.Code
+	response.Ok(platformKeyDebugOutput{
+		StatusCode:  statusCode,
+		StatusText:  http.StatusText(statusCode),
+		LatencyMs:   time.Since(startedAt).Milliseconds(),
+		ContentType: recorder.Header().Get("Content-Type"),
+		Body:        strings.TrimSpace(recorder.Body.String()),
+	}, c)
+}
+
+func resolvePlatformKeyDebugEndpoint(endpoint string) (string, string, gin.HandlerFunc, error) {
+	switch strings.TrimSpace(endpoint) {
+	case "models":
+		return http.MethodGet, "/v1/models", ApiGroupApp.ProxyApi.Models, nil
+	case "chat":
+		return http.MethodPost, "/v1/chat/completions", ApiGroupApp.ProxyApi.ChatCompletions, nil
+	case "responses":
+		return http.MethodPost, "/v1/responses", ApiGroupApp.ProxyApi.Responses, nil
+	default:
+		return "", "", nil, errors.New("unsupported debug endpoint")
+	}
 }
 
 // List 分页获取密钥列表

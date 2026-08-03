@@ -1,6 +1,10 @@
 package apis
 
 import (
+	"fmt"
+	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/global"
@@ -10,28 +14,86 @@ import (
 
 type AccountApi struct{}
 
-// Create 创建账号
-// @Summary 创建账号
-// @Description 创建账号
-// @Tags 账号模块
-// @Security ApiKeyAuth
-// @Accept json
-// @Produce json
-// @Param data body services.CreateAccountInput true "账号信息"
-// @Success 200 {object} response.Response{data=domains.Account,msg=string}
-// @Router /accounts [post]
-func (a AccountApi) Create(c *gin.Context) {
-	var input services.CreateAccountInput
+// Import 导入 Codex OAuth 账号文件。
+func (a AccountApi) Import(c *gin.Context) {
+	var input services.ImportAccountInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
-	account, err := accountService.Create(input)
+	account, err := accountService.Import(input)
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
 	response.Ok(account, c)
+	accountService.SyncOfficialAccountAsync(account.Guid)
+}
+
+// AddManual 使用手动填写的 OAuth Token 添加官方账号。
+func (a AccountApi) AddManual(c *gin.Context) {
+	var input services.ManualAccountInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	account, err := accountService.AddManual(c.Request.Context(), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(account, c)
+	accountService.SyncOfficialAccountAsync(account.Guid)
+}
+
+// StartOAuth 创建浏览器 PKCE 或设备码官方授权会话。
+func (a AccountApi) StartOAuth(c *gin.Context) {
+	var input services.AccountOAuthStartInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := accountOAuthService.Start(c.Request.Context(), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
+// GetOAuth 返回官方授权会话的最新状态。
+func (a AccountApi) GetOAuth(c *gin.Context) {
+	result, err := accountOAuthService.Get(c.Param("id"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
+// CompleteOAuth 手动提交浏览器 OAuth 回调 URL。
+func (a AccountApi) CompleteOAuth(c *gin.Context) {
+	var input services.AccountOAuthCompleteInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := accountOAuthService.CompleteBrowser(c.Param("id"), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
+// CancelOAuth 取消官方授权会话。
+func (a AccountApi) CancelOAuth(c *gin.Context) {
+	result, err := accountOAuthService.Cancel(c.Param("id"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
 }
 
 // Update 更新账号
@@ -46,7 +108,7 @@ func (a AccountApi) Create(c *gin.Context) {
 // @Success 200 {object} response.Response{data=domains.Account,msg=string}
 // @Router /accounts/{guid} [put]
 func (a AccountApi) Update(c *gin.Context) {
-	var input services.CreateAccountInput
+	var input services.UpdateAccountInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
@@ -57,6 +119,22 @@ func (a AccountApi) Update(c *gin.Context) {
 		return
 	}
 	response.Ok(account, c)
+}
+
+// Export 导出当前账号的规范 OAuth 文件。该响应包含敏感令牌。
+func (a AccountApi) Export(c *gin.Context) {
+	data, account, err := accountService.Export(c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	fileID := strings.NewReplacer("/", "_", "\\", "_", "\"", "_").Replace(account.ChatGPTAccountID)
+	if fileID == "" {
+		fileID = account.Guid
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.json\"", fileID))
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "application/json; charset=utf-8", data)
 }
 
 // List 分页获取账号列表
@@ -160,17 +238,6 @@ func (a AccountApi) Disable(c *gin.Context) {
 	response.Ok(true, c)
 }
 
-// Refresh 刷新账号状态
-// @Router /accounts/{guid}/refresh [post]
-func (a AccountApi) Refresh(c *gin.Context) {
-	account, err := accountService.Refresh(c.Param("guid"))
-	if err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	response.Ok(account, c)
-}
-
 // RefreshUsage 刷新账号额度
 // @Router /accounts/{guid}/refresh-usage [post]
 func (a AccountApi) RefreshUsage(c *gin.Context) {
@@ -182,12 +249,11 @@ func (a AccountApi) RefreshUsage(c *gin.Context) {
 	response.Ok(result, c)
 }
 
-// Test 测试账号
-// @Router /accounts/{guid}/test [post]
-func (a AccountApi) Test(c *gin.Context) {
+// Probe 主动发起一个极小的 Codex Responses 请求并采样额度响应头。
+func (a AccountApi) Probe(c *gin.Context) {
 	var input services.AccountTestInput
 	_ = c.ShouldBindJSON(&input)
-	result, err := accountService.Test(c.Param("guid"), input)
+	result, err := accountService.Probe(c.Param("guid"), input)
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
@@ -195,7 +261,7 @@ func (a AccountApi) Test(c *gin.Context) {
 	response.Ok(result, c)
 }
 
-// FetchModels 获取上游模型列表
+// FetchModels 同步账号的官方模型目录
 // @Router /accounts/fetch-models [post]
 func (a AccountApi) FetchModels(c *gin.Context) {
 	var input services.FetchAccountModelsInput
@@ -209,20 +275,6 @@ func (a AccountApi) FetchModels(c *gin.Context) {
 		return
 	}
 	response.Ok(gin.H{"models": models}, c)
-}
-
-func (a AccountApi) ParseLoginCallback(c *gin.Context) {
-	var input services.LoginCallbackParseInput
-	if err := c.ShouldBindJSON(&input); err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	result, err := accountService.ParseLoginCallback(input)
-	if err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	response.Ok(result, c)
 }
 
 // Reorder 账号排序

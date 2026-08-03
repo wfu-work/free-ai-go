@@ -3,6 +3,7 @@ system:
   addr: 8787
   db-type: sqlite
   router-prefix: /api
+  use-redis: false
 jwt:
   issuer: FreeAiGo
   signing-key: "change-me"
@@ -33,3 +34,7 @@ freeai:
   log-prompt-content: false
   upstream-proxy-enabled: false
   upstream-proxy-url: ""
+  max-request-body-bytes: 8388608
+  max-concurrent-requests: 128
+  quota-default-reserve-tokens: 8192
+  quota-reservation-ttl-seconds: 1800

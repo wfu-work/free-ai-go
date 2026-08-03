@@ -1,0 +1,1725 @@
+definitions:
+  domains.Device:
+    properties:
+      agreement:
+        type: string
+      alias:
+        type: string
+      altitude:
+        type: number
+      azi:
+        type: number
+      base:
+        type: integer
+      companyGuid:
+        type: string
+      createTime:
+        type: integer
+      deviceId:
+        type: string
+      deviceKey:
+        type: string
+      deviceType:
+        type: string
+      guid:
+        type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
+      manufacturer:
+        type: string
+      model:
+        type: string
+      projectGuid:
+        type: string
+      projectName:
+        type: string
+      rawSwitch:
+        type: integer
+      remark:
+        type: string
+      sn:
+        type: string
+      sncode:
+        type: string
+      status:
+        type: integer
+      tags:
+        type: string
+      updateTime:
+        type: integer
+      warn:
+        type: integer
+      warnSwitch:
+        type: integer
+    type: object
+  domains.DeviceRtcm:
+    properties:
+      agreement:
+        type: string
+      altitude:
+        type: number
+      createTime:
+        type: integer
+      dataCycle:
+        type: integer
+      deviceGuid:
+        type: string
+      guid:
+        type: string
+      ip:
+        type: string
+      latitude:
+        type: number
+      longitude:
+        type: number
+      mount:
+        type: string
+      password:
+        type: string
+      port:
+        type: integer
+      sncode:
+        type: string
+      status:
+        type: integer
+      updateTime:
+        type: integer
+      username:
+        type: string
+    type: object
+  domains.PageResult:
+    properties:
+      data: {}
+      page:
+        type: integer
+      size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  domains.Project:
+    properties:
+      address:
+        type: string
+      alt:
+        type: number
+      companyGuid:
+        type: string
+      cover:
+        type: string
+      createTime:
+        type: integer
+      guid:
+        type: string
+      images:
+        type: string
+      info:
+        type: string
+      lat:
+        type: number
+      layerGuid:
+        type: string
+      leader:
+        type: string
+      lng:
+        type: number
+      name:
+        type: string
+      remark:
+        type: string
+      updateTime:
+        type: integer
+      warnStatus:
+        type: integer
+    type: object
+  domains.Solve:
+    properties:
+      afterKalman:
+        type: integer
+      baseSite:
+        type: string
+      baseX:
+        type: number
+      baseY:
+        type: number
+      baseZ:
+        type: number
+      brdc:
+        type: integer
+      createTime:
+        type: integer
+      durationTime:
+        type: integer
+      guid:
+        type: string
+      initQ:
+        type: integer
+      intervalTime:
+        type: integer
+      minFixedRate:
+        type: number
+      navSys:
+        type: integer
+      projectGuid:
+        type: string
+      projectName:
+        type: string
+      sites:
+        type: string
+      solutionType:
+        type: integer
+      solveName:
+        type: string
+      status:
+        type: integer
+      updateTime:
+        type: integer
+      vrs:
+        type: integer
+    type: object
+  domains.SolveStatus:
+    properties:
+      E:
+        type: number
+      "N":
+        type: number
+      SolutionVersion:
+        type: string
+      U:
+        type: number
+      afterKalman:
+        type: integer
+      baseEpochRate:
+        type: number
+      baseName:
+        type: string
+      baseObsNum:
+        type: integer
+      baseSample:
+        type: integer
+      baseX:
+        type: number
+      baseY:
+        type: number
+      baseZ:
+        type: number
+      brdc:
+        type: integer
+      createTime:
+        type: integer
+      dposavg:
+        type: number
+      dposmax:
+        type: number
+      dposstd:
+        type: number
+      durationTime:
+        type: integer
+      errMsg:
+        type: number
+      fileStatus:
+        type: integer
+      fileStatusDesc:
+        type: string
+      fixedRate:
+        type: number
+      guid:
+        type: string
+      initQ:
+        type: integer
+      intervalTime:
+        type: integer
+      lastObsTime:
+        type: string
+      minFixedRate:
+        type: number
+      navStatus:
+        type: integer
+      navStatusDesc:
+        type: string
+      navSys:
+        type: integer
+      offTime:
+        type: string
+      projectGuid:
+        type: string
+      projectName:
+        type: string
+      roverEpochRate:
+        type: number
+      roverName:
+        type: string
+      roverObsNum:
+        type: integer
+      roverSample:
+        type: integer
+      solStatus:
+        type: string
+      solutionType:
+        type: integer
+      solveName:
+        type: string
+      status:
+        type: integer
+      taskType:
+        type: integer
+      time:
+        type: integer
+      updateTime:
+        type: integer
+      vrs:
+        type: integer
+    type: object
+  domains.Spp:
+    properties:
+      B:
+        type: number
+      H:
+        type: number
+      L:
+        type: number
+      X:
+        type: number
+      "Y":
+        type: number
+      Z:
+        type: number
+      createTime:
+        type: integer
+      guid:
+        type: string
+      sncode:
+        type: string
+      time:
+        type: integer
+      updateTime:
+        type: integer
+    type: object
+  domains.SysLog:
+    properties:
+      address:
+        type: string
+      companyGuid:
+        type: string
+      createTime:
+        type: integer
+      exception:
+        type: string
+      guid:
+        type: string
+      ip:
+        type: string
+      method:
+        type: string
+      operation:
+        type: string
+      params:
+        type: string
+      time:
+        type: integer
+      updateTime:
+        type: integer
+      userAgent:
+        type: string
+      userGuid:
+        type: string
+      username:
+        type: string
+    type: object
+  response.Response:
+    properties:
+      code:
+        type: integer
+      data: {}
+      msg:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: 单机北斗解算系统接口文档
+  title: NAV-HIPNAMES Swagger API接口文档
+  version: v1.0.0
+paths:
+  /device:
+    post:
+      consumes:
+      - application/json
+      description: 创建设备
+      parameters:
+      - description: 设备对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.Device'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: string
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建设备
+      tags:
+      - 边缘计算模块
+  /device/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据设备guid删除设备
+      parameters:
+      - description: 设备guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据设备guid删除设备
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据设备guid获取设备
+      parameters:
+      - description: 设备guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.Device'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据设备guid获取设备
+      tags:
+      - 边缘计算模块
+  /device/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取设备列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取设备列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取设备列表
+      tags:
+      - 边缘计算模块
+  /device/list/all:
+    get:
+      consumes:
+      - application/json
+      description: 获取所有设备列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/domains.Device'
+                  type: array
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取所有设备列表
+      tags:
+      - 边缘计算模块
+  /device/rtcm:
+    post:
+      consumes:
+      - application/json
+      description: 设备协议
+      parameters:
+      - description: 设备协议对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.DeviceRtcm'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 设备协议
+      tags:
+      - 边缘计算模块
+  /device/rtcm/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据设备协议guid删除设备协议
+      parameters:
+      - description: 设备协议guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据设备协议guid删除设备协议
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据设备协议guid获取设备协议
+      parameters:
+      - description: 设备协议guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.DeviceRtcm'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据设备协议guid获取设备协议
+      tags:
+      - 边缘计算模块
+  /device/rtcm/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取设备协议列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取设备协议列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取设备协议列表
+      tags:
+      - 边缘计算模块
+  /file/download:
+    get:
+      consumes:
+      - multipart/form-data
+      description: 文件下载
+      parameters:
+      - description: 文件路径
+        in: query
+        name: path
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 文件下载
+      tags:
+      - 系统模块
+  /file/upload:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 文件上传
+      parameters:
+      - description: 文件对象
+        in: body
+        name: file
+        schema: {}
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 文件上传
+      tags:
+      - 系统模块
+  /kalman/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据滤波后结果guid删除滤波后结果
+      parameters:
+      - description: 滤波后结果guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据滤波后结果删除滤波后结果
+      tags:
+      - 边缘计算模块
+  /kalman/last:
+    get:
+      consumes:
+      - application/json
+      description: 获取最新的滤波后结果
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 最新一条气象数据
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取最新的滤波后结果
+      tags:
+      - 边缘计算模块
+  /kalman/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取滤波后结果列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取滤波后结果列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取滤波后结果列表
+      tags:
+      - 边缘计算模块
+  /kalman/query:
+    get:
+      consumes:
+      - application/json
+      description: 查询滤波后结果
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 数据集合
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 查询滤波后结果
+      tags:
+      - 边缘计算模块
+  /log:
+    post:
+      consumes:
+      - application/json
+      description: 创建系统日志
+      parameters:
+      - description: 系统日志对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.SysLog'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建系统日志
+      tags:
+      - 系统模块
+  /log/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据系统日志guid删除系统日志
+      parameters:
+      - description: 系统日志guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据系统日志guid删除系统日志
+      tags:
+      - 系统模块
+    get:
+      consumes:
+      - application/json
+      description: 根据系统日志guid获取系统日志
+      parameters:
+      - description: 系统日志guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.SysLog'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据系统日志guid获取系统日志
+      tags:
+      - 系统模块
+  /log/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取系统日志列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取系统日志列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取系统日志列表
+      tags:
+      - 系统模块
+  /os/info:
+    get:
+      consumes:
+      - application/json
+      description: 获取服务器的状态
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      summary: 获取服务器的状态
+      tags:
+      - 系统模块
+  /project:
+    post:
+      consumes:
+      - application/json
+      description: 创建系统项目
+      parameters:
+      - description: 系统项目对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.Project'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建系统项目
+      tags:
+      - 边缘计算模块
+  /project/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据系统项目guid删除系统项目
+      parameters:
+      - description: 系统项目guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据系统项目guid删除系统项目
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据系统项目guid获取系统项目
+      parameters:
+      - description: 系统项目guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.Project'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据系统项目guid获取系统项目
+      tags:
+      - 边缘计算模块
+  /project/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取系统项目列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取系统项目列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取系统项目列表
+      tags:
+      - 边缘计算模块
+  /project/list/all:
+    get:
+      consumes:
+      - application/json
+      description: 获取所有系统项目列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/domains.Project'
+                  type: array
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取所有系统项目列表
+      tags:
+      - 边缘计算模块
+  /qx/last:
+    get:
+      consumes:
+      - application/json
+      description: 获取最新的概略坐标
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 最新一条气象数据
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取最新的概略坐标
+      tags:
+      - 边缘计算模块
+  /qx/query:
+    get:
+      consumes:
+      - application/json
+      description: 查询概略坐标
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 气象数据集合
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 查询概略坐标
+      tags:
+      - 边缘计算模块
+  /solve:
+    post:
+      consumes:
+      - application/json
+      description: 创建解算配置
+      parameters:
+      - description: 解算配置对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.Solve'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建解算配置
+      tags:
+      - 边缘计算模块
+  /solve/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据解算配置guid删除解算配置
+      parameters:
+      - description: 解算配置guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据解算配置guid删除解算配置
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据解算配置guid获取解算配置
+      parameters:
+      - description: 解算配置guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.Solve'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据解算配置guid获取解算配置
+      tags:
+      - 边缘计算模块
+  /solve/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取解算配置列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取解算配置列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取解算配置列表
+      tags:
+      - 边缘计算模块
+  /solve/status:
+    post:
+      consumes:
+      - application/json
+      description: 创建解算状态
+      parameters:
+      - description: 解算状态对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.SolveStatus'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建解算状态
+      tags:
+      - 边缘计算模块
+  /solve/status/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据解算状态guid删除解算状态
+      parameters:
+      - description: 解算状态guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据解算状态guid删除解算状态
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据解算状态guid获取解算状态
+      parameters:
+      - description: 解算状态guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.SolveStatus'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据解算状态guid获取解算状态
+      tags:
+      - 边缘计算模块
+  /solve/status/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取解算状态列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取解算状态列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取解算状态列表
+      tags:
+      - 边缘计算模块
+  /spp:
+    post:
+      consumes:
+      - application/json
+      description: 创建概略坐标
+      parameters:
+      - description: 概略坐标对象
+        in: body
+        name: data
+        required: true
+        schema:
+          $ref: '#/definitions/domains.Spp'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 创建概略坐标
+      tags:
+      - 边缘计算模块
+  /spp/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据概略坐标guid删除概略坐标
+      parameters:
+      - description: 概略坐标guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据概略坐标guid删除概略坐标
+      tags:
+      - 边缘计算模块
+    get:
+      consumes:
+      - application/json
+      description: 根据概略坐标guid获取概略坐标
+      parameters:
+      - description: 概略坐标guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.Spp'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据概略坐标guid获取概略坐标
+      tags:
+      - 边缘计算模块
+  /spp/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取概略坐标列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取概略坐标列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取概略坐标列表
+      tags:
+      - 边缘计算模块
+  /stacoor/{guid}:
+    delete:
+      consumes:
+      - application/json
+      description: 根据滤波前结果guid删除滤波前结果
+      parameters:
+      - description: 滤波前结果guid
+        in: path
+        name: guid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  type: boolean
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 根据滤波前结果删除滤波前结果
+      tags:
+      - 边缘计算模块
+  /stacoor/last:
+    get:
+      consumes:
+      - application/json
+      description: 获取最新的滤波前结果
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 最新一条气象数据
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取最新的滤波前结果
+      tags:
+      - 边缘计算模块
+  /stacoor/list:
+    get:
+      consumes:
+      - application/json
+      description: 分页获取滤波前结果列表
+      parameters:
+      - description: 正序
+        in: query
+        name: asc
+        type: string
+      - description: 查询内容
+        in: query
+        name: content
+        type: string
+      - description: 倒序
+        in: query
+        name: desc
+        type: string
+      - description: 页码
+        in: query
+        name: page
+        type: integer
+      - description: 每页大小
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 分页获取滤波前结果列表,返回包括列表,总数,页码,每页数量
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 分页获取滤波前结果列表
+      tags:
+      - 边缘计算模块
+  /stacoor/query:
+    get:
+      consumes:
+      - application/json
+      description: 查询滤波前结果
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 数据集合
+          schema:
+            allOf:
+            - $ref: '#/definitions/response.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/domains.PageResult'
+                msg:
+                  type: string
+              type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 查询滤波前结果
+      tags:
+      - 边缘计算模块
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
+tags:
+- description: 边缘计算相关的接口列表
+  name: 边缘计算模块

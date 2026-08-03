@@ -10,33 +10,36 @@ import (
 
 type ModelApi struct{}
 
-// Create 创建模型映射
-// @Summary 创建模型映射
-// @Description 创建模型映射
-// @Tags 模型模块
-// @Security ApiKeyAuth
-// @Accept json
-// @Produce json
-// @Param data body services.ModelInput true "模型映射信息"
-// @Success 200 {object} response.Response{data=domains.ModelMapping,msg=string}
-// @Router /models [post]
-func (a ModelApi) Create(c *gin.Context) {
-	var input services.ModelInput
+// Sync 从官方账号同步模型目录。
+// @Router /models/sync [post]
+func (a ModelApi) Sync(c *gin.Context) {
+	var input services.ModelSyncInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
-	model, err := modelService.Create(input)
+	result, err := accountService.SyncModels(input)
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
-	response.Ok(model, c)
+	response.Ok(result, c)
 }
 
-// List 分页获取模型映射列表
-// @Summary 分页获取模型映射列表
-// @Description 分页获取模型映射列表
+// SyncPricing 从 OpenAI 官方定价文档同步 API 参考价。
+// @Router /models/pricing/sync [post]
+func (a ModelApi) SyncPricing(c *gin.Context) {
+	result, err := modelPricingService.SyncOfficial(c.Request.Context())
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
+// List 分页获取模型目录
+// @Summary 分页获取模型目录
+// @Description 分页获取模型目录
 // @Tags 模型模块
 // @Security ApiKeyAuth
 // @Accept json
@@ -59,14 +62,13 @@ func (a ModelApi) List(c *gin.Context) {
 	response.Ok(pageResult(list, total, params), c)
 }
 
-// ListAll 获取所有模型映射列表
-// @Summary 获取所有模型映射列表
-// @Description 获取所有模型映射列表
+// ListAll 获取全部模型目录
+// @Summary 获取全部模型目录
+// @Description 获取全部模型目录
 // @Tags 模型模块
 // @Security ApiKeyAuth
 // @Accept json
 // @Produce json
-// @Success 200 {object} response.Response{data=[]domains.ModelMapping,msg=string}
 // @Router /models/list/all [get]
 func (a ModelApi) ListAll(c *gin.Context) {
 	list, err := modelService.ListAll()
@@ -78,15 +80,14 @@ func (a ModelApi) ListAll(c *gin.Context) {
 	response.Ok(list, c)
 }
 
-// GetByGuid 获取模型映射信息
-// @Summary 根据guid获取模型映射
-// @Description 根据guid获取模型映射
+// GetByGuid 获取模型目录信息
+// @Summary 根据guid获取模型目录
+// @Description 根据guid获取模型目录
 // @Tags 模型模块
 // @Security ApiKeyAuth
 // @Accept json
 // @Produce json
-// @Param guid path string true "模型映射guid"
-// @Success 200 {object} response.Response{data=domains.ModelMapping,msg=string}
+// @Param guid path string true "模型目录guid"
 // @Router /models/{guid} [get]
 func (a ModelApi) GetByGuid(c *gin.Context) {
 	model, err := modelService.GetByGuid(c.Param("guid"))
@@ -97,10 +98,10 @@ func (a ModelApi) GetByGuid(c *gin.Context) {
 	response.Ok(model, c)
 }
 
-// Update 更新模型映射
+// Update 更新模型对外策略
 // @Router /models/{guid} [put]
 func (a ModelApi) Update(c *gin.Context) {
-	var input services.ModelInput
+	var input services.ModelPolicyInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
@@ -113,25 +114,7 @@ func (a ModelApi) Update(c *gin.Context) {
 	response.Ok(model, c)
 }
 
-// DeleteByGuid 删除模型映射
-// @Summary 根据guid删除模型映射
-// @Description 根据guid删除模型映射
-// @Tags 模型模块
-// @Security ApiKeyAuth
-// @Accept json
-// @Produce json
-// @Param guid path string true "模型映射guid"
-// @Success 200 {object} response.Response{data=bool,msg=string}
-// @Router /models/{guid} [delete]
-func (a ModelApi) DeleteByGuid(c *gin.Context) {
-	if err := modelService.DeleteByGuid(c.Param("guid")); err != nil {
-		response.FailWithMessage(err.Error(), c)
-		return
-	}
-	response.Ok(true, c)
-}
-
-// Enable 启用模型映射
+// Enable 启用模型对外路由
 // @Router /models/{guid}/enable [post]
 func (a ModelApi) Enable(c *gin.Context) {
 	if err := modelService.SetEnabled(c.Param("guid"), true); err != nil {
@@ -141,7 +124,7 @@ func (a ModelApi) Enable(c *gin.Context) {
 	response.Ok(true, c)
 }
 
-// Disable 禁用模型映射
+// Disable 禁用模型对外路由
 // @Router /models/{guid}/disable [post]
 func (a ModelApi) Disable(c *gin.Context) {
 	if err := modelService.SetEnabled(c.Param("guid"), false); err != nil {
@@ -149,4 +132,15 @@ func (a ModelApi) Disable(c *gin.Context) {
 		return
 	}
 	response.Ok(true, c)
+}
+
+// Accounts 获取可使用指定模型的账号和最近同步状态。
+// @Router /models/{guid}/accounts [get]
+func (a ModelApi) Accounts(c *gin.Context) {
+	items, err := modelService.Accounts(c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(items, c)
 }

@@ -34,7 +34,7 @@ type CodexConfigOutput struct {
 	Model           string `json:"model"`
 	ProviderName    string `json:"providerName"`
 	APIBaseURL      string `json:"apiBaseUrl"`
-	PlatformKey     string `json:"platformKey"`
+	PlatformKey     string `json:"-"`
 	PlatformKeyID   string `json:"platformKeyId"`
 	PlatformKeyName string `json:"platformKeyName"`
 	AppliedAt       int64  `json:"appliedAt,omitempty"`
@@ -49,7 +49,7 @@ func (s CodexConfigService) Preview(input CodexConfigInput) (CodexConfigOutput, 
 	if err != nil {
 		return CodexConfigOutput{}, err
 	}
-	authJSON, err := buildCodexAuthPreview(key.Key)
+	authJSON, err := buildCodexAuthPreview(platformKeySecretPrefix + "••••••••••••••••••••••••")
 	if err != nil {
 		return CodexConfigOutput{}, err
 	}
@@ -69,7 +69,6 @@ func (s CodexConfigService) Preview(input CodexConfigInput) (CodexConfigOutput, 
 		Model:           model,
 		ProviderName:    providerName,
 		APIBaseURL:      apiBaseURL,
-		PlatformKey:     key.Key,
 		PlatformKeyID:   key.Guid,
 		PlatformKeyName: key.Name,
 	}, nil
@@ -83,7 +82,11 @@ func (s CodexConfigService) Apply(input CodexConfigInput) (CodexConfigOutput, er
 	if err := os.MkdirAll(filepath.Dir(preview.AuthPath), 0700); err != nil {
 		return CodexConfigOutput{}, err
 	}
-	if err := mergeCodexAuth(preview.AuthPath, preview.PlatformKey); err != nil {
+	secret, err := PlatformKeyServiceApp.GetSecretByGuid(preview.PlatformKeyID)
+	if err != nil {
+		return CodexConfigOutput{}, err
+	}
+	if err := mergeCodexAuth(preview.AuthPath, secret); err != nil {
 		return CodexConfigOutput{}, err
 	}
 	if err := os.WriteFile(preview.ConfigPath, []byte(preview.ConfigTOML), 0600); err != nil {
@@ -104,12 +107,6 @@ func (s CodexConfigService) validatePlatformKey(guid string) (domains.PlatformKe
 	}
 	if !key.Enabled {
 		return domains.PlatformKey{}, errors.New("platform key is disabled")
-	}
-	if normalizeProtocolType(key.ProtocolType) != "openai_compatible" {
-		return domains.PlatformKey{}, errors.New("only OpenAI Compat platform keys can be written to Codex")
-	}
-	if strings.TrimSpace(key.Key) == "" {
-		return domains.PlatformKey{}, errors.New("platform key secret is empty")
 	}
 	return key, nil
 }

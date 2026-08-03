@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wfu-work/free-ai-go/domains"
@@ -11,7 +12,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const CoreBackupVersion = "freeai-core-backup/v1"
+const CoreBackupVersion = "freeai-account-pool-backup/v3"
 
 type BackupService struct{}
 
@@ -19,7 +20,7 @@ var BackupServiceApp = BackupService{}
 
 type CoreBackupAccount struct {
 	domains.Account
-	EncryptedSecret string `json:"encryptedSecret,omitempty"`
+	EncryptedAccountFile string `json:"encryptedAccountFile,omitempty"`
 }
 
 type CoreBackupPlatformKey struct {
@@ -36,35 +37,41 @@ type CoreBackupPayload struct {
 }
 
 type CoreBackupData struct {
-	Accounts      []CoreBackupAccount     `json:"accounts"`
-	AccountGroups []domains.AccountGroup  `json:"accountGroups"`
-	AccountQuotas []domains.AccountQuota  `json:"accountQuotas"`
-	ModelMappings []domains.ModelMapping  `json:"modelMappings"`
-	PlatformKeys  []CoreBackupPlatformKey `json:"platformKeys"`
-	RouteStates   []domains.RouteState    `json:"routeStates"`
-	SystemConfigs []domains.SystemConfig  `json:"systemConfigs"`
+	Accounts       []CoreBackupAccount                `json:"accounts"`
+	AccountGroups  []domains.AccountGroup             `json:"accountGroups"`
+	AccountQuotas  []domains.AccountQuota             `json:"accountQuotas"`
+	ModelCatalogs  []domains.ModelCatalog             `json:"modelCatalogs"`
+	AccountModels  []domains.AccountModelAvailability `json:"accountModels"`
+	ModelExposures []domains.ModelExposure            `json:"modelExposures"`
+	PlatformKeys   []CoreBackupPlatformKey            `json:"platformKeys"`
+	RouteStates    []domains.RouteState               `json:"routeStates,omitempty"`
+	SystemConfigs  []domains.SystemConfig             `json:"systemConfigs"`
 }
 
 type CoreBackupImportResult struct {
-	Success             int      `json:"success"`
-	Failed              int      `json:"failed"`
-	Accounts            int      `json:"accounts"`
-	FailedAccounts      int      `json:"failedAccounts"`
-	AccountGroups       int      `json:"accountGroups"`
-	FailedAccountGroups int      `json:"failedAccountGroups"`
-	AccountQuotas       int      `json:"accountQuotas"`
-	FailedAccountQuotas int      `json:"failedAccountQuotas"`
-	ModelMappings       int      `json:"modelMappings"`
-	FailedModelMappings int      `json:"failedModelMappings"`
-	PlatformKeys        int      `json:"platformKeys"`
-	FailedPlatformKeys  int      `json:"failedPlatformKeys"`
-	RouteStates         int      `json:"routeStates"`
-	FailedRouteStates   int      `json:"failedRouteStates"`
-	SystemConfigs       int      `json:"systemConfigs"`
-	FailedSystemConfigs int      `json:"failedSystemConfigs"`
-	GatewayConfig       int      `json:"gatewayConfig"`
-	FailedGatewayConfig int      `json:"failedGatewayConfig"`
-	Errors              []string `json:"errors,omitempty"`
+	Success              int      `json:"success"`
+	Failed               int      `json:"failed"`
+	Accounts             int      `json:"accounts"`
+	FailedAccounts       int      `json:"failedAccounts"`
+	AccountGroups        int      `json:"accountGroups"`
+	FailedAccountGroups  int      `json:"failedAccountGroups"`
+	AccountQuotas        int      `json:"accountQuotas"`
+	FailedAccountQuotas  int      `json:"failedAccountQuotas"`
+	ModelCatalogs        int      `json:"modelCatalogs"`
+	FailedModelCatalogs  int      `json:"failedModelCatalogs"`
+	AccountModels        int      `json:"accountModels"`
+	FailedAccountModels  int      `json:"failedAccountModels"`
+	ModelExposures       int      `json:"modelExposures"`
+	FailedModelExposures int      `json:"failedModelExposures"`
+	PlatformKeys         int      `json:"platformKeys"`
+	FailedPlatformKeys   int      `json:"failedPlatformKeys"`
+	RouteStates          int      `json:"routeStates"`
+	FailedRouteStates    int      `json:"failedRouteStates"`
+	SystemConfigs        int      `json:"systemConfigs"`
+	FailedSystemConfigs  int      `json:"failedSystemConfigs"`
+	GatewayConfig        int      `json:"gatewayConfig"`
+	FailedGatewayConfig  int      `json:"failedGatewayConfig"`
+	Errors               []string `json:"errors,omitempty"`
 }
 
 func (s BackupService) ExportCore() (CoreBackupPayload, error) {
@@ -83,14 +90,20 @@ func (s BackupService) ExportCore() (CoreBackupPayload, error) {
 	payload.Data.Accounts = make([]CoreBackupAccount, 0, len(accounts))
 	for _, account := range accounts {
 		payload.Data.Accounts = append(payload.Data.Accounts, CoreBackupAccount{
-			Account:         account,
-			EncryptedSecret: account.EncryptedSecret,
+			Account:              account,
+			EncryptedAccountFile: account.EncryptedAccountFile,
 		})
 	}
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.AccountQuotas).Error; err != nil {
 		return payload, err
 	}
-	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.ModelMappings).Error; err != nil {
+	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.ModelCatalogs).Error; err != nil {
+		return payload, err
+	}
+	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.AccountModels).Error; err != nil {
+		return payload, err
+	}
+	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.ModelExposures).Error; err != nil {
 		return payload, err
 	}
 	var platformKeys []domains.PlatformKey
@@ -104,9 +117,6 @@ func (s BackupService) ExportCore() (CoreBackupPayload, error) {
 			KeyHash:      key.KeyHash,
 			EncryptedKey: key.EncryptedKey,
 		})
-	}
-	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.RouteStates).Error; err != nil {
-		return payload, err
 	}
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.SystemConfigs).Error; err != nil {
 		return payload, err
@@ -128,13 +138,20 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 		result.AccountGroups, result.FailedAccountGroups = upsertByGuidSkipping(tx, accountGroups, "账号分组", &result.Errors)
 
 		accounts := make([]domains.Account, 0, len(payload.Data.Accounts))
-		for _, item := range payload.Data.Accounts {
+		for index, item := range payload.Data.Accounts {
 			account := item.Account
 			account.Id = 0
-			account.EncryptedSecret = item.EncryptedSecret
+			account.EncryptedAccountFile = item.EncryptedAccountFile
+			if strings.TrimSpace(account.EncryptedAccountFile) == "" {
+				result.FailedAccounts++
+				appendImportError(&result.Errors, fmt.Sprintf("账号第%d条: 缺少 OAuth 账号文件", index+1))
+				continue
+			}
 			accounts = append(accounts, account)
 		}
-		result.Accounts, result.FailedAccounts = upsertByGuidSkipping(tx, accounts, "账号", &result.Errors)
+		var failedAccounts int
+		result.Accounts, failedAccounts = upsertByGuidSkipping(tx, accounts, "账号", &result.Errors)
+		result.FailedAccounts += failedAccounts
 
 		accountQuotas := make([]domains.AccountQuota, 0, len(payload.Data.AccountQuotas))
 		for _, item := range payload.Data.AccountQuotas {
@@ -143,12 +160,26 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 		}
 		result.AccountQuotas, result.FailedAccountQuotas = upsertByGuidSkipping(tx, accountQuotas, "账号额度", &result.Errors)
 
-		modelMappings := make([]domains.ModelMapping, 0, len(payload.Data.ModelMappings))
-		for _, item := range payload.Data.ModelMappings {
+		modelCatalogs := make([]domains.ModelCatalog, 0, len(payload.Data.ModelCatalogs))
+		for _, item := range payload.Data.ModelCatalogs {
 			item.Id = 0
-			modelMappings = append(modelMappings, item)
+			modelCatalogs = append(modelCatalogs, item)
 		}
-		result.ModelMappings, result.FailedModelMappings = upsertByGuidSkipping(tx, modelMappings, "模型映射", &result.Errors)
+		result.ModelCatalogs, result.FailedModelCatalogs = upsertByGuidSkipping(tx, modelCatalogs, "模型目录", &result.Errors)
+
+		accountModels := make([]domains.AccountModelAvailability, 0, len(payload.Data.AccountModels))
+		for _, item := range payload.Data.AccountModels {
+			item.Id = 0
+			accountModels = append(accountModels, item)
+		}
+		result.AccountModels, result.FailedAccountModels = upsertByGuidSkipping(tx, accountModels, "账号模型可用性", &result.Errors)
+
+		modelExposures := make([]domains.ModelExposure, 0, len(payload.Data.ModelExposures))
+		for _, item := range payload.Data.ModelExposures {
+			item.Id = 0
+			modelExposures = append(modelExposures, item)
+		}
+		result.ModelExposures, result.FailedModelExposures = upsertByGuidSkipping(tx, modelExposures, "模型对外策略", &result.Errors)
 
 		platformKeys := make([]domains.PlatformKey, 0, len(payload.Data.PlatformKeys))
 		for _, item := range payload.Data.PlatformKeys {
@@ -185,8 +216,8 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 	} else {
 		result.GatewayConfig = 1
 	}
-	result.Success = result.AccountGroups + result.Accounts + result.AccountQuotas + result.ModelMappings + result.PlatformKeys + result.RouteStates + result.SystemConfigs + result.GatewayConfig
-	result.Failed = result.FailedAccountGroups + result.FailedAccounts + result.FailedAccountQuotas + result.FailedModelMappings + result.FailedPlatformKeys + result.FailedRouteStates + result.FailedSystemConfigs + result.FailedGatewayConfig
+	result.Success = result.AccountGroups + result.Accounts + result.AccountQuotas + result.ModelCatalogs + result.AccountModels + result.ModelExposures + result.PlatformKeys + result.RouteStates + result.SystemConfigs + result.GatewayConfig
+	result.Failed = result.FailedAccountGroups + result.FailedAccounts + result.FailedAccountQuotas + result.FailedModelCatalogs + result.FailedAccountModels + result.FailedModelExposures + result.FailedPlatformKeys + result.FailedRouteStates + result.FailedSystemConfigs + result.FailedGatewayConfig
 	return result, nil
 }
 

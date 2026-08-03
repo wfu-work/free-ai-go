@@ -22,9 +22,11 @@ type ApiGroup struct {
 
 var (
 	accountService      = services.AccountServiceApp
+	accountOAuthService = services.AccountOAuthServiceApp
 	accountGroupService = services.AccountGroupServiceApp
 	platformKeyService  = services.PlatformKeyServiceApp
 	modelService        = services.ModelServiceApp
+	modelPricingService = services.ModelPricingServiceApp
 	quotaService        = services.QuotaServiceApp
 	requestLogService   = services.RequestLogServiceApp
 	proxyService        = services.ProxyServiceApp

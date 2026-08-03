@@ -43,8 +43,6 @@ func (s AccountGroupService) Create(input AccountGroupInput) (domains.AccountGro
 				"sort":                    input.Sort,
 				"enabled":                 enabled,
 				"remark":                  input.Remark,
-				"provider_summary":        "",
-				"account_type_summary":    "",
 				"model_summary":           "",
 				"account_count":           0,
 				"enabled_account_count":   0,
@@ -132,7 +130,7 @@ func (s AccountGroupService) List(params map[string]string) (list interface{}, t
 	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("name LIKE ? OR description LIKE ? OR remark LIKE ? OR provider_summary LIKE ? OR account_type_summary LIKE ? OR model_summary LIKE ?", like, like, like, like, like, like)
+		db = db.Where("name LIKE ? OR description LIKE ? OR remark LIKE ? OR model_summary LIKE ?", like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -155,7 +153,7 @@ func (s AccountGroupService) DeleteByGuid(guid string) error {
 	var usedAccounts int64
 	_ = global.NAV_DB.Model(&domains.Account{}).Where("account_group = ?", entity.Name).Count(&usedAccounts).Error
 	var usedModels int64
-	_ = global.NAV_DB.Model(&domains.ModelMapping{}).Where("account_group = ?", entity.Name).Count(&usedModels).Error
+	_ = global.NAV_DB.Model(&domains.ModelExposure{}).Where("account_group = ?", entity.Name).Count(&usedModels).Error
 	if usedAccounts+usedModels > 0 {
 		return errors.New("account group is in use")
 	}
@@ -178,7 +176,7 @@ func (s AccountGroupService) EnsureDefaults() error {
 			}
 		}
 	}
-	var models []domains.ModelMapping
+	var models []domains.ModelExposure
 	if err := global.NAV_DB.Select("account_group").Find(&models).Error; err == nil {
 		for _, model := range models {
 			if name := normalizeAccountGroupName(model.AccountGroup); name != "" {
@@ -226,7 +224,7 @@ func (s AccountGroupService) RefreshSummary(groupName string) error {
 	if err := accountQuery.Find(&accounts).Error; err != nil {
 		return err
 	}
-	var models []domains.ModelMapping
+	var models []domains.ModelExposure
 	modelQuery := global.NAV_DB.Where("account_group = ?", groupName)
 	if groupName == "default" {
 		modelQuery = global.NAV_DB.Where("account_group = ? OR account_group = ?", groupName, "")
@@ -235,15 +233,11 @@ func (s AccountGroupService) RefreshSummary(groupName string) error {
 		return err
 	}
 
-	providers := make([]string, 0)
-	accountTypes := make([]string, 0)
 	publicModels := make([]string, 0)
 	enabledAccounts := 0
 	availableAccounts := 0
 	enabledModels := 0
 	for _, account := range accounts {
-		providers = append(providers, account.Provider)
-		accountTypes = append(accountTypes, account.AccountType)
 		if account.Enabled {
 			enabledAccounts++
 		}
@@ -252,7 +246,6 @@ func (s AccountGroupService) RefreshSummary(groupName string) error {
 		}
 	}
 	for _, model := range models {
-		providers = append(providers, model.Provider)
 		if model.PublicModel != "" {
 			publicModels = append(publicModels, model.PublicModel)
 		}
@@ -262,8 +255,6 @@ func (s AccountGroupService) RefreshSummary(groupName string) error {
 	}
 
 	updates := map[string]any{
-		"provider_summary":        toJSONString(uniqueStrings(providers)),
-		"account_type_summary":    toJSONString(uniqueStrings(accountTypes)),
 		"model_summary":           toJSONString(uniqueStrings(publicModels)),
 		"account_count":           len(accounts),
 		"enabled_account_count":   enabledAccounts,

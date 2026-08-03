@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/nav-common-go-lib/global"
@@ -14,6 +16,13 @@ type SystemConfigService struct{}
 
 var SystemConfigServiceApp = SystemConfigService{}
 
+var systemConfigCache = struct {
+	sync.RWMutex
+	db        *gorm.DB
+	expiresAt time.Time
+	values    map[string]domains.SystemConfig
+}{values: map[string]domains.SystemConfig{}}
+
 const (
 	systemConfigTypeString = "string"
 	systemConfigTypeBool   = "bool"
@@ -21,15 +30,48 @@ const (
 
 func (s SystemConfigService) Get(key string) (domains.SystemConfig, bool) {
 	key = strings.TrimSpace(key)
-	if key == "" || !systemConfigTableReady() {
+	if key == "" {
 		return domains.SystemConfig{}, false
 	}
-	var item domains.SystemConfig
-	err := global.NAV_DB.Where("config_key = ?", key).First(&item).Error
-	if err != nil {
-		return domains.SystemConfig{}, false
+	item, ok := s.snapshot()[key]
+	return item, ok
+}
+
+// snapshot 返回短时缓存的完整运行配置，避免单个代理请求为每个配置项分别查询数据库。
+func (s SystemConfigService) snapshot() map[string]domains.SystemConfig {
+	db := global.NAV_DB
+	if db == nil {
+		return map[string]domains.SystemConfig{}
 	}
-	return item, true
+	now := time.Now()
+	systemConfigCache.RLock()
+	if systemConfigCache.db == db && now.Before(systemConfigCache.expiresAt) {
+		values := systemConfigCache.values
+		systemConfigCache.RUnlock()
+		return values
+	}
+	systemConfigCache.RUnlock()
+
+	systemConfigCache.Lock()
+	defer systemConfigCache.Unlock()
+	if systemConfigCache.db == db && now.Before(systemConfigCache.expiresAt) {
+		return systemConfigCache.values
+	}
+	if !db.Migrator().HasTable(&domains.SystemConfig{}) {
+		return map[string]domains.SystemConfig{}
+	}
+	var items []domains.SystemConfig
+	if err := db.Find(&items).Error; err != nil {
+		return map[string]domains.SystemConfig{}
+	}
+	values := make(map[string]domains.SystemConfig, len(items))
+	for _, item := range items {
+		values[item.ConfigKey] = item
+	}
+	systemConfigCache.db = db
+	systemConfigCache.values = values
+	systemConfigCache.expiresAt = now.Add(2 * time.Second)
+	return values
 }
 
 func (s SystemConfigService) GetString(key, fallback string) string {
@@ -103,12 +145,16 @@ func (s SystemConfigService) set(group, key, value, valueType, remark string) er
 	var item domains.SystemConfig
 	err := global.NAV_DB.Where("config_key = ?", key).First(&item).Error
 	if err == nil {
-		return global.NAV_DB.Model(&item).Updates(map[string]any{
+		err = global.NAV_DB.Model(&item).Updates(map[string]any{
 			"config_value": value,
 			"value_type":   valueType,
 			"group":        strings.TrimSpace(group),
 			"remark":       strings.TrimSpace(remark),
 		}).Error
+		if err == nil {
+			invalidateSystemConfigCache()
+		}
+		return err
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
@@ -120,7 +166,17 @@ func (s SystemConfigService) set(group, key, value, valueType, remark string) er
 		Group:       strings.TrimSpace(group),
 		Remark:      strings.TrimSpace(remark),
 	}
-	return global.NAV_DB.Create(&item).Error
+	err = global.NAV_DB.Create(&item).Error
+	if err == nil {
+		invalidateSystemConfigCache()
+	}
+	return err
+}
+
+func invalidateSystemConfigCache() {
+	systemConfigCache.Lock()
+	systemConfigCache.expiresAt = time.Time{}
+	systemConfigCache.Unlock()
 }
 
 func systemConfigTableReady() bool {

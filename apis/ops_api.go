@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/cast"
 	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/free-ai-go/utils"
@@ -29,9 +30,9 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	var availableAccounts int64
 	var models int64
 	var platformKeys int64
-	_ = global.NAV_DB.Model(&domains.Account{}).Where("provider = ?", "openai").Count(&accounts).Error
-	_ = global.NAV_DB.Model(&domains.Account{}).Where("enabled = ? AND status = ? AND provider = ?", true, domains.AccountStatusAvailable, "openai").Count(&availableAccounts).Error
-	_ = global.NAV_DB.Model(&domains.ModelMapping{}).Where("enabled = ? AND provider = ?", true, "openai").Count(&models).Error
+	_ = global.NAV_DB.Model(&domains.Account{}).Count(&accounts).Error
+	_ = global.NAV_DB.Model(&domains.Account{}).Where("enabled = ? AND status = ?", true, domains.AccountStatusAvailable).Count(&availableAccounts).Error
+	_ = global.NAV_DB.Model(&domains.ModelExposure{}).Where("enabled = ?", true).Count(&models).Error
 	_ = global.NAV_DB.Model(&domains.PlatformKey{}).Where("enabled = ?", true).Count(&platformKeys).Error
 	response.Ok(gin.H{
 		"ok":                true,
@@ -98,6 +99,34 @@ func (a OpsApi) Stats(c *gin.Context) {
 	response.Ok(stats, c)
 }
 
+// Usage 获取指定时间范围内的请求用量汇总。
+// @Summary 获取请求用量汇总
+// @Description 按模型、账号和 API 密钥聚合请求量、Token、成本和失败数
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Produce json
+// @Param days query int false "统计天数，默认 30 天"
+// @Success 200 {object} response.Response{data=services.UsageSummary,msg=string}
+// @Router /ops/usage [get]
+func (a OpsApi) Usage(c *gin.Context) {
+	days := cast.ToInt(c.Query("days"))
+	if days <= 0 {
+		days = 30
+	}
+	if days > 365 {
+		days = 365
+	}
+	to := time.Now().UnixMilli()
+	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+
+	result, err := services.RequestLogServiceApp.UsageSummary(since, to)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
 // Routes 获取路由状态
 // @Summary 获取路由状态
 // @Description 获取路由状态
@@ -128,7 +157,7 @@ func (a OpsApi) Routes(c *gin.Context) {
 func (a OpsApi) AccountHealth(c *gin.Context) {
 	now := time.Now().UnixMilli()
 	var accounts []domains.Account
-	if err := global.NAV_DB.Order("provider asc, account_group asc, priority asc, id desc").Find(&accounts).Error; err != nil {
+	if err := global.NAV_DB.Order("account_group asc, priority asc, id desc").Find(&accounts).Error; err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
@@ -163,45 +192,20 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 		items = append(items, gin.H{
 			"guid":                  account.Guid,
 			"name":                  account.Name,
-			"provider":              account.Provider,
-			"supplierName":          account.SupplierName,
-			"usageQueryType":        account.UsageQueryType,
-			"usageApiUrl":           account.UsageAPIURL,
 			"accountGroup":          account.AccountGroup,
 			"status":                effectiveStatus,
 			"enabled":               account.Enabled,
 			"failureCount":          account.FailureCount,
 			"cooldownUntil":         account.CooldownUntil,
 			"lastUsedAt":            account.LastUsedAt,
+			"lastRefreshedAt":       account.LastRefreshedAt,
+			"planType":              account.PlanType,
+			"tokenStatus":           account.TokenStatus,
 			"subscriptionExpiredAt": account.SubscriptionExpiredAt,
-			"nextUsageCheckAt":      nextUsageCheckAt(account, accountQuotas),
 			"quotas":                accountQuotas,
 		})
 	}
 	response.Ok(items, c)
-}
-
-func nextUsageCheckAt(account domains.Account, quotas []domains.AccountQuota) int64 {
-	if !supportsAccountUsageQuery(account) {
-		return 0
-	}
-	if len(quotas) == 0 {
-		return 0
-	}
-	var next int64
-	for _, quota := range quotas {
-		if quota.NextRefreshAt <= 0 {
-			return 0
-		}
-		if next == 0 || quota.NextRefreshAt < next {
-			next = quota.NextRefreshAt
-		}
-	}
-	return next
-}
-
-func supportsAccountUsageQuery(domains.Account) bool {
-	return false
 }
 
 func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
@@ -212,10 +216,10 @@ func hasBlockingQuotaSnapshot(quotas []domains.AccountQuota, now int64) bool {
 		if quota.Status == domains.QuotaStatusExhausted {
 			return true
 		}
-		if quota.TotalAmount > 0 && (quota.RemainingAmount <= 0 || quota.UsedPercent >= services.QuotaExhaustedPercentThreshold) {
+		if quota.LimitReached != nil && *quota.LimitReached || quota.Allowed != nil && !*quota.Allowed {
 			return true
 		}
-		if quota.TotalTokens > 0 && (quota.RemainingTokens <= 0 || quota.UsedPercent >= services.QuotaExhaustedPercentThreshold) {
+		if quota.UsedPercent != nil && *quota.UsedPercent >= services.QuotaExhaustedPercentThreshold {
 			return true
 		}
 	}

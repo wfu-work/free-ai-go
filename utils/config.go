@@ -33,9 +33,17 @@ func (m DefaultConfigManager) Ensure() error {
 		return err
 	}
 	if normalizeConfigArgs(os.Args[1:]) {
-		return nil
+		return m.EnsureSingleInstanceConfig(configArgPath(os.Args[1:]))
 	}
-	if os.Getenv("NAV_CONFIG") != "" || LocalConfigExists() {
+	if configPath := strings.TrimSpace(os.Getenv("NAV_CONFIG")); configPath != "" {
+		return m.EnsureSingleInstanceConfig(configPath)
+	}
+	if localConfigs := existingLocalConfigPaths(); len(localConfigs) > 0 {
+		for _, configPath := range localConfigs {
+			if err := m.EnsureSingleInstanceConfig(configPath); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -74,12 +82,7 @@ func (m DefaultConfigManager) SetDefaultConfigEnv(configPath string) {
 }
 
 func LocalConfigExists() bool {
-	for _, name := range localConfigFileNames {
-		if _, err := os.Stat(name); err == nil {
-			return true
-		}
-	}
-	return false
+	return len(existingLocalConfigPaths()) > 0
 }
 
 func HasConfigArg(args []string) bool {
@@ -176,6 +179,7 @@ func (m DefaultConfigManager) EnsurePortableConfig(configPath string) error {
 	baseDir := filepath.Dir(configPath)
 	dataDir := filepath.Join(baseDir, "data")
 	changed := false
+	changed = disableRedisForSingleInstance(cfg) || changed
 	changed = upgradeLegacyConfigPath(cfg, []string{"sqlite", "path"}, dataDir) || changed
 	changed = upgradeLegacyConfigPath(cfg, []string{"local", "oss-path"}, filepath.Join(dataDir, "oss")) || changed
 	changed = upgradeLegacyConfigPath(cfg, []string{"local", "cache-path"}, filepath.Join(dataDir, "cache.json")) || changed
@@ -191,6 +195,57 @@ func (m DefaultConfigManager) EnsurePortableConfig(configPath string) error {
 		return err
 	}
 	return os.WriteFile(configPath, out, 0600)
+}
+
+// EnsureSingleInstanceConfig 清理单机配置中遗留的 Redis 连接信息。
+//
+// nav-common-go-lib 当前会在 redis.addr 非空时直接连接 Redis，并不会根据
+// system.use-redis 判断是否启用。FreeAi 默认以本地单机模式运行，因此在公共
+// 初始化开始前删除无效配置，避免已有配置文件导致程序启动失败。
+func (m DefaultConfigManager) EnsureSingleInstanceConfig(configPath string) error {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+	var cfg map[string]any
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	if err = decoder.Decode(&cfg); err != nil {
+		return err
+	}
+	if !disableRedisForSingleInstance(cfg) {
+		return nil
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, out, 0600)
+}
+
+func disableRedisForSingleInstance(cfg map[string]any) bool {
+	system, _ := cfg["system"].(map[string]any)
+	if useRedis, ok := system["use-redis"].(bool); ok && useRedis {
+		return false
+	}
+	if _, ok := cfg["redis"]; !ok {
+		return false
+	}
+	delete(cfg, "redis")
+	return true
+}
+
+func existingLocalConfigPaths() []string {
+	paths := make([]string, 0, len(localConfigFileNames))
+	for _, name := range localConfigFileNames {
+		if _, err := os.Stat(name); err == nil {
+			paths = append(paths, name)
+		}
+	}
+	return paths
 }
 
 func setConfigPath(cfg map[string]any, keys []string, value string) {
@@ -267,6 +322,21 @@ func normalizeConfigArgs(args []string) bool {
 		}
 	}
 	return false
+}
+
+func configArgPath(args []string) string {
+	for i, arg := range args {
+		if (arg == "-c" || arg == "--c") && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(arg, "-c=") {
+			return strings.TrimPrefix(arg, "-c=")
+		}
+		if strings.HasPrefix(arg, "--c=") {
+			return strings.TrimPrefix(arg, "--c=")
+		}
+	}
+	return ""
 }
 
 func absPathOrOriginal(path string) string {

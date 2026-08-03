@@ -9,6 +9,7 @@ func (r OpsRouter) InitOpsRouter(group *gin.RouterGroup) {
 	group.GET("ops/gateway-config", opsApi.GatewayConfig)
 	group.PUT("ops/gateway-config", opsApi.SaveGatewayConfig)
 	group.GET("ops/stats", opsApi.Stats)
+	group.GET("ops/usage", opsApi.Usage)
 	group.GET("ops/routes", opsApi.Routes)
 	group.GET("ops/account-health", opsApi.AccountHealth)
 	group.GET("ops/master-key", opsApi.MasterKey)

@@ -2,15 +2,25 @@ package apis
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/free-ai-go/services"
 )
 
 type ProxyApi struct{}
+
+var proxyRequestGate = struct {
+	sync.Mutex
+	inFlight int
+}{}
 
 // Models 获取模型列表
 // @Summary 获取OpenAI兼容模型列表
@@ -22,23 +32,34 @@ type ProxyApi struct{}
 // @Router /v1/models [get]
 func (a ProxyApi) Models(c *gin.Context) {
 	start := time.Now()
+	requestID := uuid.NewString()
+	c.Header("X-Request-ID", requestID)
 	path := c.Request.URL.Path
 	key, err := services.PlatformKeyServiceApp.Verify(c.GetHeader("Authorization"))
 	if err != nil {
+		status := http.StatusUnauthorized
+		code := "platform_key_invalid"
+		if err.Error() == domains.ErrorPlatformKeyLimited {
+			status = http.StatusTooManyRequests
+			code = "platform_key_limited"
+			c.Header("Retry-After", "60")
+		}
 		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			RequestID:  requestID,
 			Method:     c.Request.Method,
 			Path:       path,
 			KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
-			StatusCode: http.StatusUnauthorized,
-			ErrorType:  "platform_key_invalid",
+			StatusCode: status,
+			ErrorType:  code,
 			LatencyMs:  time.Since(start).Milliseconds(),
 		})
-		c.JSON(http.StatusUnauthorized, openAIError("platform_key_invalid", err.Error()))
+		c.JSON(status, openAIError(code, err.Error()))
 		return
 	}
 	models, err := services.ModelServiceApp.ListEnabled()
 	if err != nil {
 		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			RequestID:     requestID,
 			Method:        c.Request.Method,
 			Path:          path,
 			PlatformKeyID: key.Guid,
@@ -53,18 +74,23 @@ func (a ProxyApi) Models(c *gin.Context) {
 	}
 	data := make([]gin.H, 0, len(models))
 	for _, model := range models {
-		if !services.PlatformKeyServiceApp.ModelMappingAllowed(key, model) {
+		if !services.PlatformKeyServiceApp.ModelExposureAllowed(key, model) {
+			continue
+		}
+		if !services.RouterServiceApp.HasAvailableAccount(model, key) {
 			continue
 		}
 		for _, name := range services.ModelServiceApp.PublicNames(model) {
 			data = append(data, gin.H{
 				"id":       name,
 				"object":   "model",
-				"owned_by": model.Provider,
+				"created":  model.Created,
+				"owned_by": model.OwnedBy,
 			})
 		}
 	}
 	services.RequestLogServiceApp.Record(services.RequestLogInput{
+		RequestID:     requestID,
 		Method:        c.Request.Method,
 		Path:          path,
 		PlatformKeyID: key.Guid,
@@ -98,27 +124,48 @@ func (a ProxyApi) Responses(c *gin.Context) {
 	forwardProxy(c, "/v1/responses")
 }
 
-// Embeddings OpenAI Embeddings代理
-// @Summary OpenAI Embeddings代理
-// @Description OpenAI兼容Embeddings代理入口
-// @Tags 代理模块
-// @Accept json
-// @Produce json
-// @Router /v1/embeddings [post]
-func (a ProxyApi) Embeddings(c *gin.Context) {
-	forwardProxy(c, "/v1/embeddings")
-}
-
 func forwardProxy(c *gin.Context, endpoint string) {
+	requestID := uuid.NewString()
+	c.Request.Header.Set("X-FreeAi-Request-ID", requestID)
+	c.Header("X-Request-ID", requestID)
+	maxConcurrent := services.Config().MaxConcurrentRequests
+	if maxConcurrent <= 0 {
+		maxConcurrent = 128
+	}
+	if !acquireProxyRequestSlot(maxConcurrent) {
+		c.Header("Retry-After", "1")
+		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded")
+		c.JSON(http.StatusTooManyRequests, openAIError("server_overloaded", "too many concurrent requests"))
+		return
+	}
+	defer releaseProxyRequestSlot()
+
+	maxBodyBytes := services.Config().MaxRequestBodyBytes
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = 8 * 1024 * 1024
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			recordProxyRejection(c, requestID, endpoint, http.StatusRequestEntityTooLarge, "request_too_large")
+			c.JSON(http.StatusRequestEntityTooLarge, openAIError("request_too_large", "request body exceeds the configured limit"))
+			return
+		}
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error")
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
 		return
 	}
-	if model := readModel(body); model != "" {
+	model, stream, err := readProxyMetadata(body)
+	if err != nil {
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error")
+		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
+		return
+	}
+	if model != "" {
 		c.Request.Header.Set("X-FreeAi-Model", model)
 	}
-	stream := readStream(body)
 	if stream {
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -133,16 +180,21 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
-		c.JSON(status, openAIError("proxy_error", err.Error()))
+		code := proxyErrorCode(status)
+		message := err.Error()
+		if status == http.StatusInternalServerError {
+			message = "internal server error"
+		}
+		if status == http.StatusTooManyRequests {
+			c.Header("Retry-After", "60")
+		}
+		c.JSON(status, openAIError(code, message))
 		return
 	}
 	if out.Header != nil {
-		for k, values := range out.Header {
-			for _, value := range values {
-				c.Writer.Header().Add(k, value)
-			}
-		}
+		copyProxyResponseHeaders(c.Writer.Header(), out.Header)
 	}
+	c.Header("X-Request-ID", requestID)
 	status := out.StatusCode
 	if status == 0 {
 		status = http.StatusOK
@@ -157,20 +209,80 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	c.Data(status, "application/json", out.Body)
 }
 
-func readModel(body []byte) string {
-	var payload struct {
-		Model string `json:"model"`
+func readProxyMetadata(body []byte) (string, bool, error) {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return "", false, errors.New("request body is required")
 	}
-	_ = json.Unmarshal(body, &payload)
-	return payload.Model
+	var payload struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", false, err
+	}
+	return strings.TrimSpace(payload.Model), payload.Stream, nil
 }
 
-func readStream(body []byte) bool {
-	var payload struct {
-		Stream bool `json:"stream"`
+func proxyErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "platform_key_invalid"
+	case http.StatusForbidden:
+		return "model_not_supported"
+	case http.StatusTooManyRequests:
+		return "platform_key_limited"
+	case http.StatusServiceUnavailable:
+		return "no_available_account"
+	default:
+		return "proxy_error"
 	}
-	_ = json.Unmarshal(body, &payload)
-	return payload.Stream
+}
+
+// copyProxyResponseHeaders 复制安全的端到端响应头，并过滤连接级和长度相关字段。
+func copyProxyResponseHeaders(target, source http.Header) {
+	hopByHop := map[string]bool{
+		"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true,
+		"Proxy-Authorization": true, "Te": true, "Trailer": true,
+		"Transfer-Encoding": true, "Upgrade": true, "Content-Length": true,
+	}
+	for key, values := range source {
+		canonical := http.CanonicalHeaderKey(key)
+		if hopByHop[canonical] {
+			continue
+		}
+		target.Del(canonical)
+		for _, value := range values {
+			target.Add(canonical, value)
+		}
+	}
+}
+
+func acquireProxyRequestSlot(max int) bool {
+	proxyRequestGate.Lock()
+	defer proxyRequestGate.Unlock()
+	if proxyRequestGate.inFlight >= max {
+		return false
+	}
+	proxyRequestGate.inFlight++
+	return true
+}
+
+func releaseProxyRequestSlot() {
+	proxyRequestGate.Lock()
+	if proxyRequestGate.inFlight > 0 {
+		proxyRequestGate.inFlight--
+	}
+	proxyRequestGate.Unlock()
+}
+
+func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType string) {
+	_ = services.RequestLogServiceApp.Record(services.RequestLogInput{
+		RequestID: requestID, Method: c.Request.Method, Path: endpoint,
+		KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
+		StatusCode: status, ErrorType: errorType,
+	})
 }
 
 func openAIError(code, message string) gin.H {

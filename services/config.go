@@ -12,27 +12,27 @@ import (
 )
 
 type GatewayConfig struct {
-	ProxyPrefix              string
-	RequestTimeoutSeconds    int64
-	StreamIdleTimeoutSeconds int64
-	MaxRetries               int
-	RoutingStrategy          string
-	QuotaRefreshSeconds      int64
-	CooldownSeconds          int64
-	CleanupLogRetentionDays  int
-	SecretKeyFile            string
-	LogPromptContent         bool
-	OpenAICallbackEnabled    bool
-	OpenAICallbackAddr       string
-	UpstreamProxyEnabled     bool
-	UpstreamProxyURL         string
+	ProxyPrefix                string
+	RequestTimeoutSeconds      int64
+	StreamIdleTimeoutSeconds   int64
+	MaxRetries                 int
+	RoutingStrategy            string
+	QuotaRefreshSeconds        int64
+	CooldownSeconds            int64
+	CleanupLogRetentionDays    int
+	SecretKeyFile              string
+	LogPromptContent           bool
+	UpstreamProxyEnabled       bool
+	UpstreamProxyURL           string
+	MaxRequestBodyBytes        int64
+	MaxConcurrentRequests      int
+	QuotaDefaultReserveTokens  int64
+	QuotaReservationTTLSeconds int64
 }
 
 type GatewayProxyConfigInput struct {
 	ListenAddress               string `json:"listenAddress"`
 	AccountSelectionStrategy    string `json:"accountSelectionStrategy"`
-	FreeAccountModel            string `json:"freeAccountModel"`
-	ModelRewriteRules           string `json:"modelRewriteRules"`
 	Originator                  string `json:"originator"`
 	Residency                   string `json:"residency"`
 	UpstreamProxyEnabled        bool   `json:"upstreamProxyEnabled"`
@@ -54,14 +54,14 @@ const (
 	systemConfigCleanupLogRetentionDays    = "freeai.cleanup-log-retention-days"
 	systemConfigSecretKeyFile              = "freeai.secret-key-file"
 	systemConfigLogPromptContent           = "freeai.log-prompt-content"
-	systemConfigOpenAICallbackEnabled      = "freeai.openai-callback-enabled"
-	systemConfigOpenAICallbackAddr         = "freeai.openai-callback-addr"
 	systemConfigUpstreamProxyEnabled       = "freeai.upstream-proxy-enabled"
 	systemConfigUpstreamProxyURL           = "freeai.upstream-proxy-url"
+	systemConfigMaxRequestBodyBytes        = "freeai.max-request-body-bytes"
+	systemConfigMaxConcurrentRequests      = "freeai.max-concurrent-requests"
+	systemConfigQuotaDefaultReserveTokens  = "freeai.quota-default-reserve-tokens"
+	systemConfigQuotaReservationTTLSeconds = "freeai.quota-reservation-ttl-seconds"
 	systemConfigGatewayListenAddress       = "gateway.listen-address"
 	systemConfigGatewayAccountSelection    = "gateway.account-selection-strategy"
-	systemConfigGatewayFreeAccountModel    = "gateway.free-account-model"
-	systemConfigGatewayModelRewriteRules   = "gateway.model-rewrite-rules"
 	systemConfigGatewayOriginator          = "gateway.originator"
 	systemConfigGatewayResidency           = "gateway.residency"
 	systemConfigGatewaySSEKeepAliveMs      = "gateway.sse-keep-alive-ms"
@@ -76,25 +76,23 @@ func Config() GatewayConfig {
 	} else if global.NAV_CONFIG.Extras != nil {
 		m = cast.ToStringMap(global.NAV_CONFIG.Extras["freeai"])
 	}
-	openAICallbackEnabled := true
-	if _, ok := m["openai-callback-enabled"]; ok {
-		openAICallbackEnabled = cast.ToBool(m["openai-callback-enabled"])
-	}
 	cfg := GatewayConfig{
-		ProxyPrefix:              stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
-		RequestTimeoutSeconds:    int64Default(cast.ToInt64(m["request-timeout-seconds"]), 120),
-		StreamIdleTimeoutSeconds: int64Default(cast.ToInt64(m["stream-idle-timeout-seconds"]), 60),
-		MaxRetries:               intDefault(cast.ToInt(m["max-retries"]), 1),
-		RoutingStrategy:          stringDefault(cast.ToString(m["routing-strategy"]), "weighted_round_robin"),
-		QuotaRefreshSeconds:      int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 180),
-		CooldownSeconds:          int64Default(cast.ToInt64(m["cooldown-seconds"]), 300),
-		CleanupLogRetentionDays:  intDefault(cast.ToInt(m["cleanup-log-retention-days"]), 30),
-		SecretKeyFile:            stringDefault(cast.ToString(m["secret-key-file"]), "./data/master.key"),
-		LogPromptContent:         cast.ToBool(m["log-prompt-content"]),
-		OpenAICallbackEnabled:    openAICallbackEnabled,
-		OpenAICallbackAddr:       stringDefault(cast.ToString(m["openai-callback-addr"]), ":1455"),
-		UpstreamProxyEnabled:     cast.ToBool(m["upstream-proxy-enabled"]),
-		UpstreamProxyURL:         strings.TrimSpace(cast.ToString(m["upstream-proxy-url"])),
+		ProxyPrefix:                stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
+		RequestTimeoutSeconds:      int64Default(cast.ToInt64(m["request-timeout-seconds"]), 120),
+		StreamIdleTimeoutSeconds:   int64Default(cast.ToInt64(m["stream-idle-timeout-seconds"]), 60),
+		MaxRetries:                 intDefault(cast.ToInt(m["max-retries"]), 1),
+		RoutingStrategy:            stringDefault(cast.ToString(m["routing-strategy"]), "weighted_round_robin"),
+		QuotaRefreshSeconds:        int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 180),
+		CooldownSeconds:            int64Default(cast.ToInt64(m["cooldown-seconds"]), 300),
+		CleanupLogRetentionDays:    intDefault(cast.ToInt(m["cleanup-log-retention-days"]), 30),
+		SecretKeyFile:              stringDefault(cast.ToString(m["secret-key-file"]), "./data/master.key"),
+		LogPromptContent:           cast.ToBool(m["log-prompt-content"]),
+		UpstreamProxyEnabled:       cast.ToBool(m["upstream-proxy-enabled"]),
+		UpstreamProxyURL:           strings.TrimSpace(cast.ToString(m["upstream-proxy-url"])),
+		MaxRequestBodyBytes:        int64Default(cast.ToInt64(m["max-request-body-bytes"]), 8*1024*1024),
+		MaxConcurrentRequests:      intDefault(cast.ToInt(m["max-concurrent-requests"]), 128),
+		QuotaDefaultReserveTokens:  int64Default(cast.ToInt64(m["quota-default-reserve-tokens"]), 8192),
+		QuotaReservationTTLSeconds: int64Default(cast.ToInt64(m["quota-reservation-ttl-seconds"]), 1800),
 	}
 	applySystemConfigOverrides(&cfg)
 	return cfg
@@ -111,10 +109,12 @@ func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.CleanupLogRetentionDays = SystemConfigServiceApp.GetInt(systemConfigCleanupLogRetentionDays, cfg.CleanupLogRetentionDays)
 	cfg.SecretKeyFile = SystemConfigServiceApp.GetString(systemConfigSecretKeyFile, cfg.SecretKeyFile)
 	cfg.LogPromptContent = SystemConfigServiceApp.GetBool(systemConfigLogPromptContent, cfg.LogPromptContent)
-	cfg.OpenAICallbackEnabled = SystemConfigServiceApp.GetBool(systemConfigOpenAICallbackEnabled, cfg.OpenAICallbackEnabled)
-	cfg.OpenAICallbackAddr = SystemConfigServiceApp.GetString(systemConfigOpenAICallbackAddr, cfg.OpenAICallbackAddr)
 	cfg.UpstreamProxyEnabled = SystemConfigServiceApp.GetBool(systemConfigUpstreamProxyEnabled, cfg.UpstreamProxyEnabled)
 	cfg.UpstreamProxyURL = strings.TrimSpace(SystemConfigServiceApp.GetString(systemConfigUpstreamProxyURL, cfg.UpstreamProxyURL))
+	cfg.MaxRequestBodyBytes = SystemConfigServiceApp.GetInt64(systemConfigMaxRequestBodyBytes, cfg.MaxRequestBodyBytes)
+	cfg.MaxConcurrentRequests = SystemConfigServiceApp.GetInt(systemConfigMaxConcurrentRequests, cfg.MaxConcurrentRequests)
+	cfg.QuotaDefaultReserveTokens = SystemConfigServiceApp.GetInt64(systemConfigQuotaDefaultReserveTokens, cfg.QuotaDefaultReserveTokens)
+	cfg.QuotaReservationTTLSeconds = SystemConfigServiceApp.GetInt64(systemConfigQuotaReservationTTLSeconds, cfg.QuotaReservationTTLSeconds)
 }
 
 func (c GatewayConfig) RequestTimeout() time.Duration {
@@ -146,9 +146,7 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 	cfg := Config()
 	return GatewayProxyConfigInput{
 		ListenAddress:               SystemConfigServiceApp.GetString(systemConfigGatewayListenAddress, "127.0.0.1"),
-		AccountSelectionStrategy:    SystemConfigServiceApp.GetString(systemConfigGatewayAccountSelection, "ordered"),
-		FreeAccountModel:            SystemConfigServiceApp.GetString(systemConfigGatewayFreeAccountModel, "follow_request"),
-		ModelRewriteRules:           SystemConfigServiceApp.GetString(systemConfigGatewayModelRewriteRules, "spark*=gpt-5.4-mini\nclaude-sonnet-4*=gpt-5.4"),
+		AccountSelectionStrategy:    gatewayAccountSelectionStrategy(cfg.RoutingStrategy),
 		Originator:                  SystemConfigServiceApp.GetString(systemConfigGatewayOriginator, "codex_cli_rs"),
 		Residency:                   SystemConfigServiceApp.GetString(systemConfigGatewayResidency, ""),
 		UpstreamProxyEnabled:        cfg.UpstreamProxyEnabled,
@@ -191,8 +189,7 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput) error {
 	}{
 		{systemConfigGatewayListenAddress, normalizeListenAddress(input.ListenAddress), "网关监听地址"},
 		{systemConfigGatewayAccountSelection, stringDefault(strings.TrimSpace(input.AccountSelectionStrategy), "ordered"), "账号选择策略"},
-		{systemConfigGatewayFreeAccountModel, stringDefault(strings.TrimSpace(input.FreeAccountModel), "follow_request"), "Free 账号模型"},
-		{systemConfigGatewayModelRewriteRules, strings.TrimSpace(input.ModelRewriteRules), "模型转发规则"},
+		{systemConfigRoutingStrategy, routingStrategyFromGateway(input.AccountSelectionStrategy), "账号池路由策略"},
 		{systemConfigGatewayOriginator, stringDefault(strings.TrimSpace(input.Originator), "codex_cli_rs"), "上游 Originator"},
 		{systemConfigGatewayResidency, strings.TrimSpace(input.Residency), "区域驻留要求"},
 	}
@@ -207,7 +204,32 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput) error {
 	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游总超时"); err != nil {
 		return err
 	}
-	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayStreamIdleTimeoutMs, int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000), "上游流式空闲超时")
+	requestTimeoutSeconds := input.UpstreamTimeoutMs / 1000
+	if requestTimeoutSeconds <= 0 {
+		requestTimeoutSeconds = 120
+	}
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigRequestTimeoutSeconds, requestTimeoutSeconds, "上游请求超时秒数"); err != nil {
+		return err
+	}
+	streamIdleMs := int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000)
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayStreamIdleTimeoutMs, streamIdleMs, "上游流式空闲超时"); err != nil {
+		return err
+	}
+	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigStreamIdleTimeoutSeconds, streamIdleMs/1000, "上游流式空闲超时秒数")
+}
+
+func gatewayAccountSelectionStrategy(value string) string {
+	if strings.TrimSpace(value) == "round_robin" || strings.TrimSpace(value) == "weighted_round_robin" {
+		return "round_robin"
+	}
+	return "ordered"
+}
+
+func routingStrategyFromGateway(value string) string {
+	if strings.TrimSpace(value) == "round_robin" {
+		return "weighted_round_robin"
+	}
+	return "priority_first"
 }
 
 func normalizeListenAddress(value string) string {

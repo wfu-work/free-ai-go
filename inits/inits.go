@@ -13,10 +13,8 @@ import (
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/free-ai-go/utils"
 	"github.com/wfu-work/free-ai-go/webs"
-	"github.com/wfu-work/nav-common-go-lib/global"
 	commoninits "github.com/wfu-work/nav-common-go-lib/inits"
 	commonscheduleds "github.com/wfu-work/nav-common-go-lib/scheduleds"
-	"go.uber.org/zap"
 )
 
 //go:embed config.yaml
@@ -28,20 +26,14 @@ func Init() {
 		os.Exit(1)
 	}
 	sysInit := commoninits.SysInit{}
-	sysInit.OnWebInit(func(router *gin.Engine) {
-		routers.RouterGroupApp.InitProxyWebRouter(router)
-		router.GET("/healthz", func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true, "name": "FreeAiGo"})
-		})
-	})
+	sysInit.OnWebInit(initWebRoutes)
 	sysInit.OnTableInit(func() {
-		registerTables()
+		domains.RegisterTables()
 	})
 	sysInit.OnRouterInit(func(publicGroup *gin.RouterGroup, privateGroup *gin.RouterGroup) {
 		routers.RouterGroupApp.InitGatewayRouters(publicGroup, privateGroup)
 	})
 	sysInit.OnOtherInit(func() {
-		services.StartOpenAIOAuthCallbackServer()
 		scheduleds.Bootstrap()
 	})
 	sysInit.OnScheInit(func(timers commonscheduleds.Timer, options []cron.Option) {
@@ -50,27 +42,24 @@ func Init() {
 	sysInit.OnClearInit(func() []commonscheduleds.ClearDB {
 		return []commonscheduleds.ClearDB{}
 	})
-	sysInit.OnWebInit(func(router *gin.Engine) {
-		_ = webs.InitStatic(router)
-	})
 	sysInit.Init()
 }
 
-func registerTables() {
-	db := global.NAV_DB
-	if err := db.AutoMigrate(
-		domains.Account{},
-		domains.AccountGroup{},
-		domains.AccountQuota{},
-		domains.ModelMapping{},
-		domains.PlatformKey{},
-		domains.RequestLog{},
-		domains.RouteState{},
-		domains.AuditLog{},
-		domains.SystemConfig{},
-	); err != nil {
-		global.NAV_LOG.Error("register FreeAiGo tables failed", zap.Error(err))
-		os.Exit(1)
-	}
-	global.NAV_LOG.Info("register FreeAiGo tables success")
+// initWebRoutes must register all routes through one callback. SysInit keeps
+// only the last OnWebInit callback, so splitting these registrations would
+// leave the public proxy routes unregistered and send /v1 requests to SPA fallback.
+func initWebRoutes(router *gin.Engine) {
+	routers.RouterGroupApp.InitProxyWebRouter(router)
+	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true, "name": "FreeAiGo"})
+	})
+	router.GET("/readyz", func(c *gin.Context) {
+		status := services.Readiness(c.Request.Context())
+		code := 200
+		if !status.Ready {
+			code = 503
+		}
+		c.JSON(code, status)
+	})
+	_ = webs.InitStatic(router, "/api", services.Config().ProxyPrefix, "/healthz", "/readyz")
 }

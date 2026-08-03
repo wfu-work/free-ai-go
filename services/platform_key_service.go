@@ -1,8 +1,10 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +20,20 @@ type PlatformKeyService struct{}
 
 var PlatformKeyServiceApp = PlatformKeyService{}
 
+const platformKeySecretPrefix = "sk-"
+
 var platformKeyLimiter = struct {
 	sync.Mutex
 	windows map[string]rateWindow
 }{
 	windows: map[string]rateWindow{},
+}
+
+var platformKeyLastUsed = struct {
+	sync.Mutex
+	writtenAt map[string]int64
+}{
+	writtenAt: map[string]int64{},
 }
 
 type rateWindow struct {
@@ -33,11 +44,9 @@ type rateWindow struct {
 type CreatePlatformKeyInput struct {
 	Name               string `json:"name"`
 	AllowedModels      string `json:"allowedModels"`
-	RoutingStrategy    string `json:"routingStrategy"`
 	AccountGroupFilter string `json:"accountGroupFilter"`
 	TotalTokenLimit    int64  `json:"totalTokenLimit"`
 	TokenLimitUnit     string `json:"tokenLimitUnit"`
-	ProtocolType       string `json:"protocolType"`
 	BoundModel         string `json:"boundModel"`
 	ReasoningEffort    string `json:"reasoningEffort"`
 	ServiceTier        string `json:"serviceTier"`
@@ -55,22 +64,14 @@ type PlatformKeyStatsOutput struct {
 	TotalAmount float64 `json:"totalAmount"`
 }
 
-type platformKeyUsageAgg struct {
-	PlatformKeyID string
-	UsedTokens    int64
-}
-
-const platformKeyEstimatedCostPerMillionTokens = 0.6556
-
 func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatformKeyOutput, error) {
 	if input.Name == "" {
 		return CreatePlatformKeyOutput{}, errors.New("name is required")
 	}
-	raw, err := utils.RandomHex(24)
+	key, err := generatePlatformKey()
 	if err != nil {
 		return CreatePlatformKeyOutput{}, err
 	}
-	key := "fmg_" + raw
 	utils.SetSecretKeyFile(Config().SecretKeyFile)
 	encryptedKey, err := utils.EncryptSecret(key)
 	if err != nil {
@@ -82,11 +83,9 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 		KeyPrefix:          key[:10],
 		EncryptedKey:       encryptedKey,
 		AllowedModels:      input.AllowedModels,
-		RoutingStrategy:    normalizePlatformKeyRoutingStrategy(input.RoutingStrategy),
 		AccountGroupFilter: normalizePlatformKeyAccountGroupFilter(input.AccountGroupFilter),
 		TotalTokenLimit:    input.TotalTokenLimit,
 		TokenLimitUnit:     normalizeTokenLimitUnit(input.TokenLimitUnit),
-		ProtocolType:       normalizeProtocolType(input.ProtocolType),
 		BoundModel:         strings.TrimSpace(input.BoundModel),
 		ReasoningEffort:    strings.TrimSpace(input.ReasoningEffort),
 		ServiceTier:        strings.TrimSpace(input.ServiceTier),
@@ -95,9 +94,16 @@ func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatform
 		Remark:             input.Remark,
 	}
 	err = global.NAV_DB.Create(&entity).Error
-	entity.Key = key
 	AuditServiceApp.Record("", "platform_key.create", "platform_key", entity.Guid, map[string]string{"name": entity.Name})
 	return CreatePlatformKeyOutput{Key: key, Entity: entity}, err
+}
+
+func generatePlatformKey() (string, error) {
+	raw, err := utils.RandomHex(24)
+	if err != nil {
+		return "", err
+	}
+	return platformKeySecretPrefix + raw, nil
 }
 
 func (s PlatformKeyService) List(params map[string]string) (list interface{}, total int64, err error) {
@@ -118,14 +124,12 @@ func (s PlatformKeyService) List(params map[string]string) (list interface{}, to
 	}
 	order := "id desc"
 	err = db.Order(order).Limit(limit).Offset(offset).Find(&results).Error
-	s.attachPlainKeys(results)
 	s.attachUsageStats(results)
 	return results, total, err
 }
 
 func (s PlatformKeyService) ListAll() (list []domains.PlatformKey, err error) {
 	err = global.NAV_DB.Order("id desc").Find(&list).Error
-	s.attachPlainKeys(list)
 	s.attachUsageStats(list)
 	return list, err
 }
@@ -134,7 +138,6 @@ func (s PlatformKeyService) GetByGuid(guid string) (domains.PlatformKey, error) 
 	var key domains.PlatformKey
 	err := global.NAV_DB.Where("guid = ?", guid).First(&key).Error
 	if err == nil {
-		key.Key = s.DecryptKey(key)
 		keys := []domains.PlatformKey{key}
 		s.attachUsageStats(keys)
 		key = keys[0]
@@ -157,11 +160,9 @@ func (s PlatformKeyService) Update(guid string, input CreatePlatformKeyInput) (d
 	if err := global.NAV_DB.Model(&key).Updates(map[string]any{
 		"name":                  input.Name,
 		"allowed_models":        input.AllowedModels,
-		"routing_strategy":      normalizePlatformKeyRoutingStrategy(input.RoutingStrategy),
 		"account_group_filter":  normalizePlatformKeyAccountGroupFilter(input.AccountGroupFilter),
 		"total_token_limit":     input.TotalTokenLimit,
 		"token_limit_unit":      normalizeTokenLimitUnit(input.TokenLimitUnit),
-		"protocol_type":         normalizeProtocolType(input.ProtocolType),
 		"bound_model":           strings.TrimSpace(input.BoundModel),
 		"reasoning_effort":      strings.TrimSpace(input.ReasoningEffort),
 		"service_tier":          strings.TrimSpace(input.ServiceTier),
@@ -192,15 +193,21 @@ func (s PlatformKeyService) SetEnabled(guid string, enabled bool) error {
 
 func (s PlatformKeyService) Stats() (PlatformKeyStatsOutput, error) {
 	var usedTokens int64
-	err := global.NAV_DB.Model(&domains.RequestLog{}).
-		Select("COALESCE(SUM(input_tokens + output_tokens), 0)").
+	var usedCostMicrousd int64
+	err := global.NAV_DB.Model(&domains.PlatformKey{}).
+		Select("COALESCE(SUM(used_tokens), 0)").
 		Scan(&usedTokens).Error
 	if err != nil {
 		return PlatformKeyStatsOutput{}, err
 	}
+	if err := global.NAV_DB.Model(&domains.PlatformKey{}).
+		Select("COALESCE(SUM(used_cost_microusd), 0)").
+		Scan(&usedCostMicrousd).Error; err != nil {
+		return PlatformKeyStatsOutput{}, err
+	}
 	return PlatformKeyStatsOutput{
 		TotalTokens: usedTokens,
-		TotalAmount: estimatePlatformKeyAmount(usedTokens),
+		TotalAmount: microusdToUSD(usedCostMicrousd),
 	}, nil
 }
 
@@ -224,10 +231,7 @@ func (s PlatformKeyService) Verify(header string) (domains.PlatformKey, error) {
 	if !s.allowRequest(key) {
 		return domains.PlatformKey{}, errors.New(domains.ErrorPlatformKeyLimited)
 	}
-	if !s.allowTotalTokens(key) {
-		return domains.PlatformKey{}, errors.New(domains.ErrorPlatformKeyLimited)
-	}
-	_ = global.NAV_DB.Model(&domains.PlatformKey{}).Where("guid = ?", key.Guid).Update("last_used_at", time.Now().UnixMilli()).Error
+	s.touchLastUsed(key.Guid)
 	return key, nil
 }
 
@@ -237,9 +241,9 @@ func (s PlatformKeyService) VerifyForModel(header, model string) (domains.Platfo
 		return domains.PlatformKey{}, err
 	}
 	if model != "" {
-		mapping, findErr := ModelServiceApp.Find(model)
+		routedModel, findErr := ModelServiceApp.Find(model)
 		if findErr == nil {
-			if !s.ModelMappingAllowed(key, mapping) {
+			if !s.ModelExposureAllowed(key, routedModel) {
 				return domains.PlatformKey{}, errors.New(domains.ErrorModelNotSupported)
 			}
 			return key, nil
@@ -257,7 +261,7 @@ func (s PlatformKeyService) ModelAllowed(key domains.PlatformKey, model string) 
 	})
 }
 
-func (s PlatformKeyService) ModelMappingAllowed(key domains.PlatformKey, model domains.ModelMapping) bool {
+func (s PlatformKeyService) ModelExposureAllowed(key domains.PlatformKey, model RoutedModel) bool {
 	if key.AccountGroupFilter != "" && key.AccountGroupFilter != model.AccountGroup {
 		return false
 	}
@@ -269,8 +273,6 @@ func (s PlatformKeyService) ModelMappingAllowed(key domains.PlatformKey, model d
 			return true
 		case strings.TrimPrefix(allowed, "group:") != allowed:
 			return strings.TrimPrefix(allowed, "group:") == model.AccountGroup
-		case strings.TrimPrefix(allowed, "provider:") != allowed:
-			return strings.TrimPrefix(allowed, "provider:") == model.Provider
 		default:
 			return false
 		}
@@ -289,22 +291,6 @@ func (s PlatformKeyService) EffectiveTokenLimit(key domains.PlatformKey) int64 {
 	default:
 		return key.TotalTokenLimit
 	}
-}
-
-func (s PlatformKeyService) allowTotalTokens(key domains.PlatformKey) bool {
-	limit := s.EffectiveTokenLimit(key)
-	if limit <= 0 {
-		return true
-	}
-	var used int64
-	err := global.NAV_DB.Model(&domains.RequestLog{}).
-		Where("platform_key_id = ?", key.Guid).
-		Select("COALESCE(SUM(input_tokens + output_tokens), 0)").
-		Scan(&used).Error
-	if err != nil {
-		return true
-	}
-	return used < limit
 }
 
 func (s PlatformKeyService) allowedByRules(raw string, match func(string) bool) bool {
@@ -336,6 +322,14 @@ func (s PlatformKeyService) allowRequest(key domains.PlatformKey) bool {
 	}
 	now := time.Now().Unix()
 	windowStart := now - now%60
+	if global.NAV_REDIS != nil {
+		redisKey := fmt.Sprintf("freeai:platform-key:rate:%s:%d", key.Guid, windowStart)
+		const script = `local current = redis.call('INCR', KEYS[1]); if current == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]); end; return current`
+		count, err := global.NAV_REDIS.Eval(context.Background(), script, []string{redisKey}, 90).Int64()
+		if err == nil {
+			return count <= int64(key.RateLimitPerMinute)
+		}
+	}
 	platformKeyLimiter.Lock()
 	defer platformKeyLimiter.Unlock()
 	window := platformKeyLimiter.windows[key.Guid]
@@ -351,6 +345,22 @@ func (s PlatformKeyService) allowRequest(key domains.PlatformKey) bool {
 	return true
 }
 
+// touchLastUsed 将高频请求对 last_used_at 的写入合并为每把密钥每分钟最多一次。
+func (s PlatformKeyService) touchLastUsed(guid string) {
+	if guid == "" {
+		return
+	}
+	now := time.Now().UnixMilli()
+	platformKeyLastUsed.Lock()
+	if now-platformKeyLastUsed.writtenAt[guid] < time.Minute.Milliseconds() {
+		platformKeyLastUsed.Unlock()
+		return
+	}
+	platformKeyLastUsed.writtenAt[guid] = now
+	platformKeyLastUsed.Unlock()
+	_ = global.NAV_DB.Model(&domains.PlatformKey{}).Where("guid = ?", guid).Update("last_used_at", now).Error
+}
+
 func (s PlatformKeyService) DecryptKey(key domains.PlatformKey) string {
 	if strings.TrimSpace(key.EncryptedKey) == "" {
 		return ""
@@ -363,53 +373,27 @@ func (s PlatformKeyService) DecryptKey(key domains.PlatformKey) string {
 	return value
 }
 
-func (s PlatformKeyService) attachPlainKeys(keys []domains.PlatformKey) {
-	for i := range keys {
-		keys[i].Key = s.DecryptKey(keys[i])
+// GetSecretByGuid 仅供受信任的服务端流程读取密钥。调用方不得记录或持久化返回的明文。
+func (s PlatformKeyService) GetSecretByGuid(guid string) (string, error) {
+	var key domains.PlatformKey
+	if err := global.NAV_DB.Where("guid = ?", strings.TrimSpace(guid)).First(&key).Error; err != nil {
+		return "", err
 	}
+	secret := s.DecryptKey(key)
+	if secret == "" {
+		return "", errors.New("platform key secret is unavailable")
+	}
+	return secret, nil
 }
 
 func (s PlatformKeyService) attachUsageStats(keys []domains.PlatformKey) {
-	if len(keys) == 0 {
-		return
-	}
-	guids := make([]string, 0, len(keys))
-	for _, key := range keys {
-		guids = append(guids, key.Guid)
-	}
-	var rows []platformKeyUsageAgg
-	err := global.NAV_DB.Model(&domains.RequestLog{}).
-		Select("platform_key_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used_tokens").
-		Where("platform_key_id IN ?", guids).
-		Group("platform_key_id").
-		Scan(&rows).Error
-	if err != nil {
-		return
-	}
-	stats := make(map[string]int64, len(rows))
-	for _, row := range rows {
-		stats[row.PlatformKeyID] = row.UsedTokens
-	}
 	for i := range keys {
-		keys[i].UsedTokens = stats[keys[i].Guid]
-		keys[i].UsedAmount = estimatePlatformKeyAmount(keys[i].UsedTokens)
+		keys[i].UsedAmount = microusdToUSD(keys[i].UsedCostMicrousd)
 	}
 }
 
-func estimatePlatformKeyAmount(tokens int64) float64 {
-	if tokens <= 0 {
-		return 0
-	}
-	return float64(tokens) / 1000000 * platformKeyEstimatedCostPerMillionTokens
-}
-
-func normalizePlatformKeyRoutingStrategy(value string) string {
-	switch strings.TrimSpace(value) {
-	case "account_round_robin", "api_round_robin", "mixed_round_robin":
-		return strings.TrimSpace(value)
-	default:
-		return "account_round_robin"
-	}
+func microusdToUSD(value int64) float64 {
+	return float64(value) / 1000000
 }
 
 func normalizePlatformKeyAccountGroupFilter(value string) string {
@@ -422,14 +406,5 @@ func normalizeTokenLimitUnit(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""
-	}
-}
-
-func normalizeProtocolType(value string) string {
-	switch strings.TrimSpace(value) {
-	case "openai_compatible", "claude", "gemini":
-		return strings.TrimSpace(value)
-	default:
-		return "openai_compatible"
 	}
 }

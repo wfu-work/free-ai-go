@@ -1,11 +1,11 @@
 package services
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/wfu-work/free-ai-go/domains"
@@ -17,9 +17,11 @@ type RouterService struct{}
 
 var RouterServiceApp = RouterService{}
 
+var routeStateLocks sync.Map
+
 type RouteSelection struct {
-	Model   domains.ModelMapping `json:"model"`
-	Account domains.Account      `json:"account"`
+	Model   RoutedModel     `json:"model"`
+	Account domains.Account `json:"account"`
 }
 
 func (s RouterService) Select(modelName string) (RouteSelection, error) {
@@ -28,6 +30,28 @@ func (s RouterService) Select(modelName string) (RouteSelection, error) {
 
 func (s RouterService) SelectExcluding(modelName string, excluded map[string]bool) (RouteSelection, error) {
 	return s.SelectForKey(modelName, excluded, domains.PlatformKey{})
+}
+
+// HasAvailableAccount 判断模型在平台密钥限定范围内是否至少存在一个可路由账号。
+func (s RouterService) HasAvailableAccount(model RoutedModel, key domains.PlatformKey) bool {
+	accountGroup := model.AccountGroup
+	if key.AccountGroupFilter != "" {
+		accountGroup = key.AccountGroupFilter
+	}
+	accounts, err := AccountServiceApp.FindAvailable(accountGroup, model.UpstreamModel, 100)
+	if err != nil || len(accounts) == 0 {
+		return false
+	}
+	availableGuids, err := ModelServiceApp.AvailableAccountGuids(model.CatalogGuid)
+	if err != nil {
+		return false
+	}
+	for _, account := range accounts {
+		if availableGuids[account.Guid] {
+			return true
+		}
+	}
+	return false
 }
 
 func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, key domains.PlatformKey) (RouteSelection, error) {
@@ -39,7 +63,11 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 	if key.AccountGroupFilter != "" {
 		accountGroup = key.AccountGroupFilter
 	}
-	accounts, err := AccountServiceApp.FindAvailable(model.Provider, accountGroup, model.UpstreamModel, 100)
+	accounts, err := AccountServiceApp.FindAvailable(accountGroup, model.UpstreamModel, 100)
+	if err != nil {
+		return RouteSelection{}, err
+	}
+	availableGuids, err := ModelServiceApp.AvailableAccountGuids(model.CatalogGuid)
 	if err != nil {
 		return RouteSelection{}, err
 	}
@@ -48,15 +76,7 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 		if excluded != nil && excluded[account.Guid] {
 			continue
 		}
-		if supportsModel(account.SupportedModels, model.UpstreamModel) || supportsModel(account.SupportedModels, model.PublicModel) {
-			candidates = append(candidates, account)
-		}
-	}
-	if len(candidates) == 0 {
-		for _, account := range accounts {
-			if excluded != nil && excluded[account.Guid] {
-				continue
-			}
+		if availableGuids[account.Guid] {
 			candidates = append(candidates, account)
 		}
 	}
@@ -67,46 +87,16 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 	return RouteSelection{Model: model, Account: account}, nil
 }
 
-func supportsModel(raw, model string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "*" {
-		return true
-	}
-	var models []string
-	if err := json.Unmarshal([]byte(raw), &models); err == nil {
-		for _, item := range models {
-			if strings.TrimSpace(item) == model || strings.TrimSpace(item) == "*" {
-				return true
-			}
-		}
-		return false
-	}
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part == model || part == "*" {
-			return true
-		}
-	}
-	return false
-}
-
-func (s RouterService) pick(model domains.ModelMapping, accounts []domains.Account) domains.Account {
+func (s RouterService) pick(model RoutedModel, accounts []domains.Account) domains.Account {
 	strategy := Config().RoutingStrategy
 	return s.pickByStrategy(model, accounts, strategy)
 }
 
-func (s RouterService) pickForKey(model domains.ModelMapping, accounts []domains.Account, key domains.PlatformKey) domains.Account {
-	strategy := Config().RoutingStrategy
-	switch key.RoutingStrategy {
-	case "account_round_robin", "mixed_round_robin":
-		strategy = "weighted_round_robin"
-	case "api_round_robin":
-		strategy = "round_robin"
-	}
-	return s.pickByStrategy(model, accounts, strategy)
+func (s RouterService) pickForKey(model RoutedModel, accounts []domains.Account, key domains.PlatformKey) domains.Account {
+	return s.pickByStrategy(model, accounts, Config().RoutingStrategy)
 }
 
-func (s RouterService) pickByStrategy(model domains.ModelMapping, accounts []domains.Account, strategy string) domains.Account {
+func (s RouterService) pickByStrategy(model RoutedModel, accounts []domains.Account, strategy string) domains.Account {
 	switch strategy {
 	case "round_robin":
 		return s.pickRoundRobin(model, accounts, false)
@@ -129,10 +119,18 @@ func (s RouterService) pickByStrategy(model domains.ModelMapping, accounts []dom
 	}
 }
 
-func (s RouterService) pickRoundRobin(model domains.ModelMapping, accounts []domains.Account, weighted bool) domains.Account {
-	routeKey := fmt.Sprintf("%s:%s:%s:%t", model.Provider, model.AccountGroup, model.PublicModel, weighted)
-	state := s.routeState(routeKey)
-	cursor := state.Cursor
+func (s RouterService) pickRoundRobin(model RoutedModel, accounts []domains.Account, weighted bool) domains.Account {
+	routeKey := fmt.Sprintf("%s:%s:%t", model.AccountGroup, model.PublicModel, weighted)
+	state := domains.RouteState{}
+	cursor, redisCursor := s.redisRouteCursor(routeKey)
+	if !redisCursor {
+		lockValue, _ := routeStateLocks.LoadOrStore(routeKey, &sync.Mutex{})
+		lock := lockValue.(*sync.Mutex)
+		lock.Lock()
+		defer lock.Unlock()
+		state = s.routeState(routeKey)
+		cursor = state.Cursor
+	}
 	var selected domains.Account
 	if weighted {
 		totalWeight := 0
@@ -163,8 +161,22 @@ func (s RouterService) pickRoundRobin(model domains.ModelMapping, accounts []dom
 	if selected.Guid == "" {
 		selected = accounts[0]
 	}
-	s.saveRouteState(state, selected.Guid, cursor+1)
+	if !redisCursor {
+		s.saveRouteState(state, selected.Guid, cursor+1)
+	}
 	return selected
+}
+
+// redisRouteCursor 在启用 Redis 时使用原子自增游标，使多实例共享同一轮询顺序。
+func (s RouterService) redisRouteCursor(routeKey string) (int, bool) {
+	if global.NAV_REDIS == nil {
+		return 0, false
+	}
+	value, err := global.NAV_REDIS.Incr(context.Background(), "freeai:route:cursor:"+routeKey).Result()
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	return int(value - 1), true
 }
 
 func (s RouterService) routeState(routeKey string) domains.RouteState {
@@ -192,20 +204,47 @@ func (s RouterService) saveRouteState(state domains.RouteState, accountGuid stri
 }
 
 func (s RouterService) pickMostQuotaRemaining(accounts []domains.Account) (domains.Account, bool) {
-	byGuid := map[string]domains.Account{}
 	guids := make([]string, 0, len(accounts))
 	for _, account := range accounts {
-		byGuid[account.Guid] = account
 		guids = append(guids, account.Guid)
 	}
 	var quotas []domains.AccountQuota
-	if err := global.NAV_DB.Where("account_guid IN ?", guids).Order("remaining_tokens desc").Find(&quotas).Error; err != nil {
+	if err := global.NAV_DB.Where("account_guid IN ?", guids).Find(&quotas).Error; err != nil {
 		return domains.Account{}, false
 	}
-	for _, quota := range quotas {
-		if account, ok := byGuid[quota.AccountGuid]; ok && quota.Status != domains.QuotaStatusExhausted {
-			return account, true
-		}
+	type quotaScore struct {
+		known bool
+		used  float64
+		reset int64
 	}
-	return domains.Account{}, false
+	scores := map[string]quotaScore{}
+	now := time.Now().UnixMilli()
+	for _, quota := range quotas {
+		if quota.ResetAt > 0 && quota.ResetAt <= now || quota.UsedPercent == nil {
+			continue
+		}
+		score := scores[quota.AccountGuid]
+		if !score.known || *quota.UsedPercent > score.used {
+			score.known = true
+			score.used = *quota.UsedPercent
+		}
+		if quota.ResetAt > score.reset {
+			score.reset = quota.ResetAt
+		}
+		scores[quota.AccountGuid] = score
+	}
+	sort.SliceStable(accounts, func(i, j int) bool {
+		left, right := scores[accounts[i].Guid], scores[accounts[j].Guid]
+		if left.known != right.known {
+			return left.known
+		}
+		if left.used != right.used {
+			return left.used < right.used
+		}
+		if left.reset != right.reset {
+			return left.reset < right.reset
+		}
+		return accounts[i].LastUsedAt < accounts[j].LastUsedAt
+	})
+	return accounts[0], true
 }
