@@ -1,0 +1,26 @@
+services:
+  freeai:
+    image: registry.cn-hangzhou.aliyuncs.com/navfirst/freeai:1.0.0
+    container_name: freeai
+    hostname: freeai
+    ports:
+      - "8787:8787"
+    environment:
+      NAV_DB_TYPE: "${NAV_DB_TYPE:-pgsql}"
+      NAV_PGSQL_HOST: "${NAV_PGSQL_HOST:-127.0.0.1}"
+      NAV_PGSQL_PORT: "${NAV_PGSQL_PORT:-5432}"
+      NAV_PGSQL_DB_NAME: "${NAV_PGSQL_DB_NAME:-nav_freeai}"
+      NAV_PGSQL_USERNAME: "${NAV_PGSQL_USERNAME:-root}"
+      NAV_PGSQL_PASSWORD: "${NAV_PGSQL_PASSWORD:-1qaz@WSX3edc}"
+      NAV_PGSQL_MAX_IDLE_CONNS: "${NAV_PGSQL_MAX_IDLE_CONNS:-10}"
+      NAV_PGSQL_MAX_OPEN_CONNS: "${NAV_PGSQL_MAX_OPEN_CONNS:-50}"
+    volumes:
+      - ./freeai/logback:/app/freeai/logback
+      - ./freeai/data:/app/freeai/data
+    restart: always
+    networks:
+      - nav-net
+
+networks:
+  nav-net:
+    driver: bridge

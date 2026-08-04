@@ -1,0 +1,1 @@
+docker build -t registry.cn-hangzhou.aliyuncs.com/navfirst/freeai:1.0.0 .
