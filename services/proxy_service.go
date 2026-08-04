@@ -1,7 +1,6 @@
 package services
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -311,11 +310,8 @@ func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string
 		Body:     body,
 		Stream:   stream,
 	}
-	timeout := time.Duration(selection.Model.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = Config().RequestTimeout()
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	timeout := effectiveUpstreamTimeout(selection.Model.TimeoutSec, Config().RequestTimeout())
+	ctx, cancel := contextWithOptionalTimeout(r.Context(), timeout)
 	defer cancel()
 	var result *ProxyResult
 	var err error
@@ -328,6 +324,18 @@ func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string
 		return nil, ProxyOutput{StatusCode: http.StatusBadGateway}, err
 	}
 	return result, ProxyOutput{StatusCode: result.StatusCode, Header: result.Header, Body: result.Body}, err
+}
+
+// effectiveUpstreamTimeout 计算单次代理请求的总超时。
+// 网关总超时为 0 时全局关闭；模型为 0 时继承网关设置。
+func effectiveUpstreamTimeout(modelTimeoutSec int, gatewayTimeout time.Duration) time.Duration {
+	if gatewayTimeout <= 0 {
+		return 0
+	}
+	if modelTimeoutSec <= 0 {
+		return gatewayTimeout
+	}
+	return time.Duration(modelTimeoutSec) * time.Second
 }
 
 func shouldRetry(result *ProxyResult, err error, stream bool) bool {

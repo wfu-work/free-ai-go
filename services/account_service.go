@@ -479,7 +479,7 @@ func (s AccountService) syncAccountModelsOnce(accountGuid string) (ModelSyncStat
 	if err != nil {
 		return ModelSyncStats{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	ctx, cancel := contextWithOptionalTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
@@ -550,7 +550,7 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	if err != nil {
 		return RefreshUsageResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	ctx, cancel := contextWithOptionalTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
@@ -648,7 +648,7 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 		}},
 		"store": false,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), Config().RequestTimeout())
+	ctx, cancel := contextWithOptionalTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
 	started := time.Now()
 	result, err := ProxyAPIClientApp.Do(ctx, account, ProxyRequest{Endpoint: "/v1/responses", Model: model, Body: body})

@@ -211,8 +211,8 @@ func (s ModelService) Update(guid string, input ModelPolicyInput) (ModelCatalogI
 		return ModelCatalogItem{}, findErr
 	}
 	timeoutSec := input.TimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = int(Config().RequestTimeoutSeconds)
+	if timeoutSec < 0 {
+		return ModelCatalogItem{}, errors.New("timeoutSec must be greater than or equal to 0")
 	}
 	enabled, visible := true, true
 	if findErr == nil {
@@ -676,7 +676,7 @@ func (s ModelService) ensureDefaultExposure(db *gorm.DB, model domains.ModelCata
 	}
 	exposure = domains.ModelExposure{
 		ModelCatalogGuid: model.Guid, PublicModel: model.RemoteModelID,
-		TimeoutSec: int(Config().RequestTimeoutSeconds), Enabled: true, Visible: true,
+		TimeoutSec: 0, Enabled: true, Visible: true,
 	}
 	return db.Create(&exposure).Error
 }

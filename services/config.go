@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -115,6 +116,11 @@ func Config() GatewayConfig {
 func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.ProxyPrefix = SystemConfigServiceApp.GetString(systemConfigProxyPrefix, cfg.ProxyPrefix)
 	cfg.RequestTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigRequestTimeoutSeconds, cfg.RequestTimeoutSeconds)
+	// gateway.upstream-timeout-ms 是管理界面的当前配置源；存在时覆盖旧的秒级兼容项。
+	if _, ok := SystemConfigServiceApp.Get(systemConfigGatewayUpstreamTimeoutMs); ok {
+		timeoutMs := SystemConfigServiceApp.GetInt64(systemConfigGatewayUpstreamTimeoutMs, cfg.RequestTimeoutSeconds*1000)
+		cfg.RequestTimeoutSeconds = timeoutMillisecondsToSeconds(timeoutMs)
+	}
 	cfg.StreamIdleTimeoutSeconds = SystemConfigServiceApp.GetInt64(systemConfigStreamIdleTimeoutSeconds, cfg.StreamIdleTimeoutSeconds)
 	cfg.MaxRetries = SystemConfigServiceApp.GetInt(systemConfigMaxRetries, cfg.MaxRetries)
 	cfg.RoutingStrategy = SystemConfigServiceApp.GetString(systemConfigRoutingStrategy, cfg.RoutingStrategy)
@@ -134,6 +140,14 @@ func applySystemConfigOverrides(cfg *GatewayConfig) {
 
 func (c GatewayConfig) RequestTimeout() time.Duration {
 	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+// contextWithOptionalTimeout 创建可取消的请求上下文；timeout <= 0 表示不设置截止时间。
+func contextWithOptionalTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (c GatewayConfig) EffectiveUpstreamProxyURL() string {
@@ -179,6 +193,9 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 
 func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfigInput, error) {
 	input.UpstreamProxyURL = strings.TrimSpace(input.UpstreamProxyURL)
+	if input.UpstreamTimeoutMs < 0 {
+		return GatewayProxyConfigInput{}, errors.New("upstreamTimeoutMs must be greater than or equal to 0")
+	}
 	capacity, err := resolveGatewayCapacity(input, Config())
 	if err != nil {
 		return GatewayProxyConfigInput{}, err
@@ -228,10 +245,7 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayC
 	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游总超时"); err != nil {
 		return err
 	}
-	requestTimeoutSeconds := input.UpstreamTimeoutMs / 1000
-	if requestTimeoutSeconds <= 0 {
-		requestTimeoutSeconds = 120
-	}
+	requestTimeoutSeconds := timeoutMillisecondsToSeconds(input.UpstreamTimeoutMs)
 	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigRequestTimeoutSeconds, requestTimeoutSeconds, "上游请求超时秒数"); err != nil {
 		return err
 	}
@@ -252,6 +266,17 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayC
 		return err
 	}
 	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigOverloadQueueTimeoutMs, capacity.OverloadQueueTimeoutMs, "网关过载排队时间毫秒")
+}
+
+func timeoutMillisecondsToSeconds(timeoutMs int64) int64 {
+	if timeoutMs <= 0 {
+		return 0
+	}
+	seconds := timeoutMs / 1000
+	if seconds == 0 {
+		return 1
+	}
+	return seconds
 }
 
 func resolveGatewayCapacity(input GatewayProxyConfigInput, fallback GatewayConfig) (gatewayCapacityConfig, error) {

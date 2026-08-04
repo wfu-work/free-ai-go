@@ -147,7 +147,7 @@ func (s *AccountOAuthService) Start(ctx context.Context, input AccountOAuthStart
 		session.result.AuthorizationURL = authorizationURL
 		session.result.CallbackListening = true
 	} else {
-		requestCtx, requestCancel := context.WithTimeout(ctx, Config().RequestTimeout())
+		requestCtx, requestCancel := contextWithOptionalTimeout(ctx, Config().RequestTimeout())
 		device, err := oauth.StartDeviceAuthorization(requestCtx)
 		requestCancel()
 		if err != nil {
