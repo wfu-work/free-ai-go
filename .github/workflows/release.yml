@@ -201,7 +201,27 @@ jobs:
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             gh release upload "${RELEASE_TAG}" dist/* --clobber
           else
+            notes_file="$(mktemp)"
+            cat > "${notes_file}" <<'EOF'
+          ## FreeAI v1.0.0
+
+          FreeAI 是一个面向 OpenAI 兼容客户端的本地 AI 网关，支持账号池路由、额度管理、上游代理和请求保护。
+
+          ### 本次发布
+
+          - 支持 macOS、Linux、Windows 的 amd64 和 arm64 可执行程序。
+          - 发布构建启用 `CGO_ENABLED=1`，并按目标系统使用原生 C 工具链。
+          - 网关支持最大并发、请求体大小、故障切换重试和过载排队时间配置。
+          - 自动生成 SHA-256 校验文件，所有压缩包均包含示例配置文件。
+
+          ### 使用方式
+
+          1. 下载与你的系统和架构对应的压缩包。
+          2. 解压后复制 `config.example.yaml` 为 `config.yaml` 并按需调整。
+          3. 启动 `freeai`（Windows 使用 `freeai.exe`）。
+          EOF
             gh release create "${RELEASE_TAG}" dist/* \
               --title "${RELEASE_TAG}" \
-              --generate-notes
+              --notes-file "${notes_file}"
+            rm -f "${notes_file}"
           fi
