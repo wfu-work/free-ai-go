@@ -107,6 +107,7 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
+          msys2-location: C:/msys64
           update: true
           install: ${{ matrix.toolchain }}
 
