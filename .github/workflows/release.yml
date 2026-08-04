@@ -77,14 +77,14 @@ jobs:
           - goos: windows
             goarch: amd64
             runner: windows-2025
-            cc: gcc
+            cc: C:/msys64/mingw64/bin/gcc.exe
             msystem: MINGW64
             toolchain: mingw-w64-x86_64-toolchain
             archive: zip
           - goos: windows
             goarch: arm64
             runner: windows-11-arm
-            cc: clang
+            cc: C:/msys64/clangarm64/bin/clang.exe
             msystem: CLANGARM64
             toolchain: mingw-w64-clang-aarch64-toolchain
             archive: zip
@@ -134,19 +134,19 @@ jobs:
 
       - name: Build Windows executable
         if: matrix.goos == 'windows'
-        shell: msys2 {0}
+        shell: pwsh
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.cc }}
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
 
-          mkdir -p "bin/${GOOS}-${GOARCH}"
-          go build \
-            -trimpath \
-            -ldflags "-s -w" \
-            -o "bin/${GOOS}-${GOARCH}/${APP}.exe" \
+          New-Item -ItemType Directory -Force -Path "bin/${env:GOOS}-${env:GOARCH}" | Out-Null
+          go build `
+            -trimpath `
+            -ldflags "-s -w" `
+            -o "bin/${env:GOOS}-${env:GOARCH}/${env:APP}.exe" `
             .
 
       - name: Package Unix executable
