@@ -1,6 +1,7 @@
 package apis
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,7 +21,8 @@ type ProxyApi struct{}
 var proxyRequestGate = struct {
 	sync.Mutex
 	inFlight int
-}{}
+	notify   chan struct{}
+}{notify: make(chan struct{})}
 
 // Models 获取模型列表
 // @Summary 获取OpenAI兼容模型列表
@@ -128,11 +130,13 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	requestID := uuid.NewString()
 	c.Request.Header.Set("X-FreeAi-Request-ID", requestID)
 	c.Header("X-Request-ID", requestID)
-	maxConcurrent := services.Config().MaxConcurrentRequests
+	cfg := services.Config()
+	maxConcurrent := cfg.MaxConcurrentRequests
 	if maxConcurrent <= 0 {
 		maxConcurrent = 128
 	}
-	if !acquireProxyRequestSlot(maxConcurrent) {
+	queueTimeout := time.Duration(cfg.OverloadQueueTimeoutMs) * time.Millisecond
+	if !acquireProxyRequestSlot(c.Request.Context(), maxConcurrent, queueTimeout) {
 		c.Header("Retry-After", "1")
 		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded")
 		c.JSON(http.StatusTooManyRequests, openAIError("server_overloaded", "too many concurrent requests"))
@@ -140,7 +144,7 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	}
 	defer releaseProxyRequestSlot()
 
-	maxBodyBytes := services.Config().MaxRequestBodyBytes
+	maxBodyBytes := cfg.MaxRequestBodyBytes
 	if maxBodyBytes <= 0 {
 		maxBodyBytes = 8 * 1024 * 1024
 	}
@@ -259,14 +263,49 @@ func copyProxyResponseHeaders(target, source http.Header) {
 	}
 }
 
-func acquireProxyRequestSlot(max int) bool {
-	proxyRequestGate.Lock()
-	defer proxyRequestGate.Unlock()
-	if proxyRequestGate.inFlight >= max {
-		return false
+func acquireProxyRequestSlot(ctx context.Context, max int, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		proxyRequestGate.Lock()
+		if proxyRequestGate.inFlight < max {
+			proxyRequestGate.inFlight++
+			proxyRequestGate.Unlock()
+			return true
+		}
+		notify := proxyRequestGate.notify
+		proxyRequestGate.Unlock()
+
+		if wait <= 0 {
+			return false
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return false
+		case <-timer.C:
+			return false
+		case <-notify:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
 	}
-	proxyRequestGate.inFlight++
-	return true
 }
 
 func releaseProxyRequestSlot() {
@@ -274,6 +313,8 @@ func releaseProxyRequestSlot() {
 	if proxyRequestGate.inFlight > 0 {
 		proxyRequestGate.inFlight--
 	}
+	close(proxyRequestGate.notify)
+	proxyRequestGate.notify = make(chan struct{})
 	proxyRequestGate.Unlock()
 }
 

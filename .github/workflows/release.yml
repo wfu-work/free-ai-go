@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       tag:
@@ -14,14 +17,17 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   APP: freeai
-  CGO_ENABLED: "0"
-  PLATFORMS: darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
+  CGO_ENABLED: "1"
 
 jobs:
-  release:
-    name: Build and publish release
+  test:
+    name: Test with CGO
     runs-on: ubuntu-latest
 
     steps:
@@ -29,7 +35,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -38,54 +44,157 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Test
-        run: make test
+        run: go test ./...
 
-      - name: Build packages
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+            cc: clang
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+            cc: clang
+            archive: tar.gz
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+            cc: gcc
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            runner: windows-2025
+            cc: C:/msys64/mingw64/bin/gcc.exe
+            msystem: MINGW64
+            toolchain: mingw-w64-x86_64-toolchain
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            runner: windows-11-arm
+            cc: C:/msys64/clangarm64/bin/clang.exe
+            msystem: CLANGARM64
+            toolchain: mingw-w64-clang-aarch64-toolchain
+            archive: zip
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Windows C toolchain
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: ${{ matrix.toolchain }}
+
+      - name: Build executable
+        shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc }}
         run: |
           set -euo pipefail
 
-          rm -rf bin dist
-          mkdir -p dist
+          extension=""
+          if [ "${GOOS}" = "windows" ]; then
+            extension=".exe"
+          fi
 
-          for platform in ${PLATFORMS}; do
-            os="${platform%/*}"
-            arch="${platform#*/}"
-            ext=""
-            archive_ext="tar.gz"
+          mkdir -p "bin/${GOOS}-${GOARCH}"
+          go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o "bin/${GOOS}-${GOARCH}/${APP}${extension}" \
+            .
 
-            if [ "${os}" = "windows" ]; then
-              ext=".exe"
-              archive_ext="zip"
-            fi
+      - name: Package Unix executable
+        if: matrix.goos != 'windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
 
-            package_name="${APP}_${RELEASE_TAG}_${os}_${arch}"
-            package_dir="dist/${package_name}"
-            binary_path="bin/${os}-${arch}/${APP}${ext}"
+          package_name="${APP}_${RELEASE_TAG}_${GOOS}_${GOARCH}"
+          package_dir="dist/${package_name}"
+          mkdir -p "${package_dir}"
+          cp "bin/${GOOS}-${GOARCH}/${APP}" "${package_dir}/"
+          cp config.yaml "${package_dir}/config.example.yaml"
+          tar -czf "dist/${package_name}.tar.gz" -C dist "${package_name}"
+          rm -rf "${package_dir}"
 
-            echo "building ${binary_path}"
-            GOOS="${os}" GOARCH="${arch}" make build
+      - name: Package Windows executable
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $ErrorActionPreference = "Stop"
 
-            mkdir -p "${package_dir}"
-            cp "${binary_path}" "${package_dir}/"
-            cp config.yaml "${package_dir}/config.example.yaml"
+          $packageName = "${env:APP}_${env:RELEASE_TAG}_${env:GOOS}_${env:GOARCH}"
+          $packageDir = Join-Path "dist" $packageName
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Copy-Item "bin/${env:GOOS}-${env:GOARCH}/${env:APP}.exe" $packageDir
+          Copy-Item "config.yaml" (Join-Path $packageDir "config.example.yaml")
+          Compress-Archive -Path $packageDir -DestinationPath "dist/${packageName}.zip" -Force
+          Remove-Item -Recurse -Force $packageDir
 
-            if [ "${archive_ext}" = "zip" ]; then
-              (cd dist && zip -qr "${package_name}.zip" "${package_name}")
-            else
-              tar -czf "dist/${package_name}.tar.gz" -C dist "${package_name}"
-            fi
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
 
-            rm -rf "${package_dir}"
-          done
+  release:
+    name: Publish release assets
+    needs: build
+    runs-on: ubuntu-latest
 
-          (cd dist && shasum -a 256 *.tar.gz *.zip > checksums.txt)
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > checksums.txt
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -94,5 +203,5 @@ jobs:
           else
             gh release create "${RELEASE_TAG}" dist/* \
               --title "${RELEASE_TAG}" \
-              --notes "Automated release for ${RELEASE_TAG}."
+              --generate-notes
           fi

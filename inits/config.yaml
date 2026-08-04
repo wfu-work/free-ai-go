@@ -36,5 +36,6 @@ freeai:
   upstream-proxy-url: ""
   max-request-body-bytes: 8388608
   max-concurrent-requests: 128
+  overload-queue-timeout-ms: 0
   quota-default-reserve-tokens: 8192
   quota-reservation-ttl-seconds: 1800

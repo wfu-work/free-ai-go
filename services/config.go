@@ -26,6 +26,7 @@ type GatewayConfig struct {
 	UpstreamProxyURL           string
 	MaxRequestBodyBytes        int64
 	MaxConcurrentRequests      int
+	OverloadQueueTimeoutMs     int64
 	QuotaDefaultReserveTokens  int64
 	QuotaReservationTTLSeconds int64
 }
@@ -40,6 +41,17 @@ type GatewayProxyConfigInput struct {
 	SSEKeepAliveMs              int64  `json:"sseKeepAliveMs"`
 	UpstreamTimeoutMs           int64  `json:"upstreamTimeoutMs"`
 	UpstreamStreamIdleTimeoutMs int64  `json:"upstreamStreamIdleTimeoutMs"`
+	MaxConcurrentRequests       *int   `json:"maxConcurrentRequests,omitempty"`
+	MaxRequestBodyMiB           *int64 `json:"maxRequestBodyMiB,omitempty"`
+	MaxRetries                  *int   `json:"maxRetries,omitempty"`
+	OverloadQueueTimeoutMs      *int64 `json:"overloadQueueTimeoutMs,omitempty"`
+}
+
+type gatewayCapacityConfig struct {
+	MaxConcurrentRequests  int
+	MaxRequestBodyBytes    int64
+	MaxRetries             int
+	OverloadQueueTimeoutMs int64
 }
 
 const (
@@ -58,6 +70,7 @@ const (
 	systemConfigUpstreamProxyURL           = "freeai.upstream-proxy-url"
 	systemConfigMaxRequestBodyBytes        = "freeai.max-request-body-bytes"
 	systemConfigMaxConcurrentRequests      = "freeai.max-concurrent-requests"
+	systemConfigOverloadQueueTimeoutMs     = "freeai.overload-queue-timeout-ms"
 	systemConfigQuotaDefaultReserveTokens  = "freeai.quota-default-reserve-tokens"
 	systemConfigQuotaReservationTTLSeconds = "freeai.quota-reservation-ttl-seconds"
 	systemConfigGatewayListenAddress       = "gateway.listen-address"
@@ -91,6 +104,7 @@ func Config() GatewayConfig {
 		UpstreamProxyURL:           strings.TrimSpace(cast.ToString(m["upstream-proxy-url"])),
 		MaxRequestBodyBytes:        int64Default(cast.ToInt64(m["max-request-body-bytes"]), 8*1024*1024),
 		MaxConcurrentRequests:      intDefault(cast.ToInt(m["max-concurrent-requests"]), 128),
+		OverloadQueueTimeoutMs:     cast.ToInt64(m["overload-queue-timeout-ms"]),
 		QuotaDefaultReserveTokens:  int64Default(cast.ToInt64(m["quota-default-reserve-tokens"]), 8192),
 		QuotaReservationTTLSeconds: int64Default(cast.ToInt64(m["quota-reservation-ttl-seconds"]), 1800),
 	}
@@ -113,6 +127,7 @@ func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.UpstreamProxyURL = strings.TrimSpace(SystemConfigServiceApp.GetString(systemConfigUpstreamProxyURL, cfg.UpstreamProxyURL))
 	cfg.MaxRequestBodyBytes = SystemConfigServiceApp.GetInt64(systemConfigMaxRequestBodyBytes, cfg.MaxRequestBodyBytes)
 	cfg.MaxConcurrentRequests = SystemConfigServiceApp.GetInt(systemConfigMaxConcurrentRequests, cfg.MaxConcurrentRequests)
+	cfg.OverloadQueueTimeoutMs = SystemConfigServiceApp.GetInt64(systemConfigOverloadQueueTimeoutMs, cfg.OverloadQueueTimeoutMs)
 	cfg.QuotaDefaultReserveTokens = SystemConfigServiceApp.GetInt64(systemConfigQuotaDefaultReserveTokens, cfg.QuotaDefaultReserveTokens)
 	cfg.QuotaReservationTTLSeconds = SystemConfigServiceApp.GetInt64(systemConfigQuotaReservationTTLSeconds, cfg.QuotaReservationTTLSeconds)
 }
@@ -144,6 +159,7 @@ func UpstreamHTTPClient() (*http.Client, error) {
 
 func GatewayProxyConfig() GatewayProxyConfigInput {
 	cfg := Config()
+	maxRequestBodyMiB := bytesToMiB(cfg.MaxRequestBodyBytes)
 	return GatewayProxyConfigInput{
 		ListenAddress:               SystemConfigServiceApp.GetString(systemConfigGatewayListenAddress, "127.0.0.1"),
 		AccountSelectionStrategy:    gatewayAccountSelectionStrategy(cfg.RoutingStrategy),
@@ -154,11 +170,19 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 		SSEKeepAliveMs:              SystemConfigServiceApp.GetInt64(systemConfigGatewaySSEKeepAliveMs, 15000),
 		UpstreamTimeoutMs:           SystemConfigServiceApp.GetInt64(systemConfigGatewayUpstreamTimeoutMs, cfg.RequestTimeoutSeconds*1000),
 		UpstreamStreamIdleTimeoutMs: SystemConfigServiceApp.GetInt64(systemConfigGatewayStreamIdleTimeoutMs, cfg.StreamIdleTimeoutSeconds*1000),
+		MaxConcurrentRequests:       intPtr(cfg.MaxConcurrentRequests),
+		MaxRequestBodyMiB:           int64Ptr(maxRequestBodyMiB),
+		MaxRetries:                  intPtr(cfg.MaxRetries),
+		OverloadQueueTimeoutMs:      int64Ptr(cfg.OverloadQueueTimeoutMs),
 	}
 }
 
 func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfigInput, error) {
 	input.UpstreamProxyURL = strings.TrimSpace(input.UpstreamProxyURL)
+	capacity, err := resolveGatewayCapacity(input, Config())
+	if err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
 	if input.UpstreamProxyEnabled {
 		if input.UpstreamProxyURL == "" {
 			return GatewayProxyConfigInput{}, errors.New("upstreamProxyUrl is required when upstream proxy is enabled")
@@ -175,13 +199,13 @@ func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfig
 	if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, systemConfigUpstreamProxyURL, input.UpstreamProxyURL, "上游代理地址"); err != nil {
 		return GatewayProxyConfigInput{}, err
 	}
-	if err := updateGatewayRuntimeConfig(input); err != nil {
+	if err := updateGatewayRuntimeConfig(input, capacity); err != nil {
 		return GatewayProxyConfigInput{}, err
 	}
 	return GatewayProxyConfig(), nil
 }
 
-func updateGatewayRuntimeConfig(input GatewayProxyConfigInput) error {
+func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayCapacityConfig) error {
 	values := []struct {
 		key    string
 		value  string
@@ -215,8 +239,64 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput) error {
 	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayStreamIdleTimeoutMs, streamIdleMs, "上游流式空闲超时"); err != nil {
 		return err
 	}
-	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigStreamIdleTimeoutSeconds, streamIdleMs/1000, "上游流式空闲超时秒数")
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigStreamIdleTimeoutSeconds, streamIdleMs/1000, "上游流式空闲超时秒数"); err != nil {
+		return err
+	}
+	if err := SystemConfigServiceApp.SetInt(systemConfigGroupGateway, systemConfigMaxConcurrentRequests, capacity.MaxConcurrentRequests, "网关最大并发请求数"); err != nil {
+		return err
+	}
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigMaxRequestBodyBytes, capacity.MaxRequestBodyBytes, "网关最大请求体字节数"); err != nil {
+		return err
+	}
+	if err := SystemConfigServiceApp.SetInt(systemConfigGroupGateway, systemConfigMaxRetries, capacity.MaxRetries, "上游故障切换重试次数"); err != nil {
+		return err
+	}
+	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigOverloadQueueTimeoutMs, capacity.OverloadQueueTimeoutMs, "网关过载排队时间毫秒")
 }
+
+func resolveGatewayCapacity(input GatewayProxyConfigInput, fallback GatewayConfig) (gatewayCapacityConfig, error) {
+	capacity := gatewayCapacityConfig{
+		MaxConcurrentRequests:  fallback.MaxConcurrentRequests,
+		MaxRequestBodyBytes:    fallback.MaxRequestBodyBytes,
+		MaxRetries:             fallback.MaxRetries,
+		OverloadQueueTimeoutMs: fallback.OverloadQueueTimeoutMs,
+	}
+	if input.MaxConcurrentRequests != nil {
+		capacity.MaxConcurrentRequests = *input.MaxConcurrentRequests
+	}
+	if input.MaxRequestBodyMiB != nil {
+		capacity.MaxRequestBodyBytes = *input.MaxRequestBodyMiB * 1024 * 1024
+	}
+	if input.MaxRetries != nil {
+		capacity.MaxRetries = *input.MaxRetries
+	}
+	if input.OverloadQueueTimeoutMs != nil {
+		capacity.OverloadQueueTimeoutMs = *input.OverloadQueueTimeoutMs
+	}
+
+	switch {
+	case capacity.MaxConcurrentRequests < 1 || capacity.MaxConcurrentRequests > 4096:
+		return gatewayCapacityConfig{}, errors.New("maxConcurrentRequests must be between 1 and 4096")
+	case capacity.MaxRequestBodyBytes < 1024*1024 || capacity.MaxRequestBodyBytes > 512*1024*1024:
+		return gatewayCapacityConfig{}, errors.New("maxRequestBodyMiB must be between 1 and 512")
+	case capacity.MaxRetries < 0 || capacity.MaxRetries > 5:
+		return gatewayCapacityConfig{}, errors.New("maxRetries must be between 0 and 5")
+	case capacity.OverloadQueueTimeoutMs < 0 || capacity.OverloadQueueTimeoutMs > 60000:
+		return gatewayCapacityConfig{}, errors.New("overloadQueueTimeoutMs must be between 0 and 60000")
+	}
+	return capacity, nil
+}
+
+func bytesToMiB(value int64) int64 {
+	if value <= 0 {
+		return 1
+	}
+	const mib = int64(1024 * 1024)
+	return (value + mib - 1) / mib
+}
+
+func intPtr(value int) *int       { return &value }
+func int64Ptr(value int64) *int64 { return &value }
 
 func gatewayAccountSelectionStrategy(value string) string {
 	if strings.TrimSpace(value) == "round_robin" || strings.TrimSpace(value) == "weighted_round_robin" {

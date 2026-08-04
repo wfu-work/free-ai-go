@@ -8,10 +8,12 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cast v1.10.0
+	github.com/swaggo/swag v1.16.6
 	github.com/wfu-work/nav-common-go-lib v0.0.0-20260721155653-38ed4a403c2b
 	github.com/wfu-work/proxy-api-lib v0.0.0-20260803150218-e173da73876e
 	go.uber.org/zap v1.28.0
 	go.yaml.in/yaml/v3 v3.0.4
+	golang.org/x/sync v0.22.0
 	gorm.io/gorm v1.31.2
 )
 
@@ -85,7 +87,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/swaggo/files v1.0.1 // indirect
 	github.com/swaggo/gin-swagger v1.6.1 // indirect
-	github.com/swaggo/swag v1.16.6 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
@@ -100,7 +101,6 @@ require (
 	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
