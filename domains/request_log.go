@@ -22,7 +22,15 @@ type RequestLog struct {
 	SwitchCount       int     `json:"switchCount" gorm:"comment:切换次数"`
 	SwitchReason      string  `json:"switchReason" gorm:"comment:切换原因"`
 	LatencyMs         int64   `json:"latencyMs" gorm:"comment:总耗时"`
-	FirstTokenMs      int64   `json:"firstTokenMs" gorm:"comment:首Token耗时"`
+	PreparationMs     int64   `json:"preparationMs" gorm:"comment:上游请求准备耗时"`
+	DNSMs             int64   `json:"dnsMs" gorm:"comment:DNS解析耗时"`
+	ConnectMs         int64   `json:"connectMs" gorm:"comment:连接建立耗时"`
+	TLSHandshakeMs    int64   `json:"tlsHandshakeMs" gorm:"comment:TLS握手耗时"`
+	UpstreamHeaderMs  int64   `json:"upstreamHeaderMs" gorm:"comment:上游响应头耗时"`
+	FirstEventMs      int64   `json:"firstEventMs" gorm:"comment:首个SSE事件耗时"`
+	FirstTokenMs      int64   `json:"firstTokenMs" gorm:"comment:首个正文Token耗时"`
+	ConnectionReused  bool    `json:"connectionReused" gorm:"comment:是否复用上游连接"`
+	ConnectionTraced  bool    `json:"connectionTraced" gorm:"comment:是否采集到连接信息"`
 	InputTokens       int64   `json:"inputTokens" gorm:"comment:输入Token"`
 	CachedInputTokens int64   `json:"cachedInputTokens" gorm:"comment:缓存输入Token"`
 	OutputTokens      int64   `json:"outputTokens" gorm:"comment:输出Token"`

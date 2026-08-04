@@ -175,14 +175,30 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	}
 	errorType := ""
 	latencyMs := time.Since(start).Milliseconds()
+	preparationMs := int64(0)
+	dnsMs := int64(0)
+	connectMs := int64(0)
+	tlsHandshakeMs := int64(0)
+	upstreamHeaderMs := int64(0)
+	firstEventMs := int64(0)
 	firstTokenMs := int64(0)
+	connectionReused := false
+	connectionTraced := false
 	inputTokens := int64(0)
 	cachedInputTokens := int64(0)
 	outputTokens := int64(0)
 	if lastResult != nil {
 		errorType = lastResult.ErrorType
 		latencyMs = lastResult.LatencyMs
+		preparationMs = lastResult.PreparationMs
+		dnsMs = lastResult.DNSMs
+		connectMs = lastResult.ConnectMs
+		tlsHandshakeMs = lastResult.TLSHandshakeMs
+		upstreamHeaderMs = lastResult.UpstreamHeaderMs
+		firstEventMs = lastResult.FirstEventMs
 		firstTokenMs = lastResult.FirstTokenMs
+		connectionReused = lastResult.ConnectionReused
+		connectionTraced = lastResult.ConnectionTraced
 		inputTokens = lastResult.Usage.InputTokens
 		cachedInputTokens = lastResult.Usage.CachedInputTokens
 		outputTokens = lastResult.Usage.OutputTokens
@@ -214,7 +230,15 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		SwitchCount:       len(switchReasons),
 		SwitchReason:      strings.Join(switchReasons, ";"),
 		LatencyMs:         latencyMs,
+		PreparationMs:     preparationMs,
+		DNSMs:             dnsMs,
+		ConnectMs:         connectMs,
+		TLSHandshakeMs:    tlsHandshakeMs,
+		UpstreamHeaderMs:  upstreamHeaderMs,
+		FirstEventMs:      firstEventMs,
 		FirstTokenMs:      firstTokenMs,
+		ConnectionReused:  connectionReused,
+		ConnectionTraced:  connectionTraced,
 		InputTokens:       inputTokens,
 		CachedInputTokens: cachedInputTokens,
 		OutputTokens:      outputTokens,

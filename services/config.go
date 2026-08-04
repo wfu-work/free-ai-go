@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cast"
@@ -54,6 +55,13 @@ type gatewayCapacityConfig struct {
 	MaxRetries             int
 	OverloadQueueTimeoutMs int64
 }
+
+var upstreamHTTPClientCache = struct {
+	sync.Mutex
+	proxyURL  string
+	client    *http.Client
+	transport *http.Transport
+}{}
 
 const (
 	systemConfigGroupGateway               = "gateway"
@@ -158,17 +166,44 @@ func (c GatewayConfig) EffectiveUpstreamProxyURL() string {
 }
 
 func UpstreamHTTPClient() (*http.Client, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	proxyURL := Config().EffectiveUpstreamProxyURL()
+	return upstreamHTTPClientForProxy(Config().EffectiveUpstreamProxyURL())
+}
+
+func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	var parsedProxy *url.URL
 	if proxyURL != "" {
 		parsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, err
 		}
-		transport.Proxy = http.ProxyURL(parsed)
+		parsedProxy = parsed
 	}
-	return &http.Client{Transport: transport}, nil
+
+	upstreamHTTPClientCache.Lock()
+	defer upstreamHTTPClientCache.Unlock()
+	if upstreamHTTPClientCache.client != nil && upstreamHTTPClientCache.proxyURL == proxyURL {
+		return upstreamHTTPClientCache.client, nil
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = true
+	transport.DisableKeepAlives = false
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	if parsedProxy != nil {
+		transport.Proxy = http.ProxyURL(parsedProxy)
+	}
+	client := &http.Client{Transport: transport}
+	if upstreamHTTPClientCache.transport != nil {
+		upstreamHTTPClientCache.transport.CloseIdleConnections()
+	}
+	upstreamHTTPClientCache.proxyURL = proxyURL
+	upstreamHTTPClientCache.client = client
+	upstreamHTTPClientCache.transport = transport
+	return client, nil
 }
 
 func GatewayProxyConfig() GatewayProxyConfigInput {

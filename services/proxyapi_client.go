@@ -31,14 +31,22 @@ type ProxyUsage struct {
 }
 
 type ProxyResult struct {
-	StatusCode    int
-	Header        http.Header
-	Body          []byte
-	Usage         ProxyUsage
-	ErrorType     string
-	FirstTokenMs  int64
-	LatencyMs     int64
-	StreamStarted bool
+	StatusCode       int
+	Header           http.Header
+	Body             []byte
+	Usage            ProxyUsage
+	ErrorType        string
+	PreparationMs    int64
+	DNSMs            int64
+	ConnectMs        int64
+	TLSHandshakeMs   int64
+	UpstreamHeaderMs int64
+	FirstEventMs     int64
+	FirstTokenMs     int64
+	LatencyMs        int64
+	ConnectionReused bool
+	ConnectionTraced bool
+	StreamStarted    bool
 }
 
 type ProxyAPIClient interface {
@@ -65,25 +73,33 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 	if err != nil {
 		return nil, err
 	}
-	result, err := client.Codex.Create(ctx, accountRouteID(account, file), responseReq)
+	preparationMs := time.Since(start).Milliseconds()
+	trace := newUpstreamRequestTrace()
+	result, err := client.Codex.Create(trace.context(ctx), accountRouteID(account, file), responseReq)
 	if isChatGPTUnauthorized(err) {
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
 			client, _ = chatGPTClient(file)
-			result, err = client.Codex.Create(ctx, accountRouteID(account, file), responseReq)
+			preparationMs = time.Since(start).Milliseconds()
+			trace = newUpstreamRequestTrace()
+			result, err = client.Codex.Create(trace.context(ctx), accountRouteID(account, file), responseReq)
 		}
 	}
 	if err != nil {
-		return apiErrorResult(err, time.Since(start).Milliseconds())
+		proxyResult, proxyErr := apiErrorResult(err, time.Since(start).Milliseconds())
+		applyUpstreamTiming(proxyResult, preparationMs, trace)
+		return proxyResult, proxyErr
 	}
 	body, err := responseBody(req, result.Response)
 	if err != nil {
 		return nil, err
 	}
 	latency := time.Since(start).Milliseconds()
-	return &ProxyResult{
+	proxyResult := &ProxyResult{
 		StatusCode: result.StatusCode, Header: result.Header.Clone(), Body: body,
 		Usage: usageFromResponse(result.Response), FirstTokenMs: latency, LatencyMs: latency,
-	}, nil
+	}
+	applyUpstreamTiming(proxyResult, preparationMs, trace)
+	return proxyResult, nil
 }
 
 func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
@@ -101,19 +117,26 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	if err != nil {
 		return nil, err
 	}
-	upstream, err := client.Codex.Stream(ctx, accountRouteID(account, file), responseReq)
+	preparationMs := time.Since(start).Milliseconds()
+	trace := newUpstreamRequestTrace()
+	upstream, err := client.Codex.Stream(trace.context(ctx), accountRouteID(account, file), responseReq)
 	if isChatGPTUnauthorized(err) {
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
 			client, _ = chatGPTClient(file)
-			upstream, err = client.Codex.Stream(ctx, accountRouteID(account, file), responseReq)
+			preparationMs = time.Since(start).Milliseconds()
+			trace = newUpstreamRequestTrace()
+			upstream, err = client.Codex.Stream(trace.context(ctx), accountRouteID(account, file), responseReq)
 		}
 	}
 	if err != nil {
-		return apiErrorResult(err, time.Since(start).Milliseconds())
+		proxyResult, proxyErr := apiErrorResult(err, time.Since(start).Milliseconds())
+		applyUpstreamTiming(proxyResult, preparationMs, trace)
+		return proxyResult, proxyErr
 	}
 	stream := upstream.Stream
 	defer stream.Close()
 	result := &ProxyResult{StatusCode: upstream.StatusCode, Header: upstream.Header.Clone()}
+	applyUpstreamTiming(result, preparationMs, trace)
 	if result.Header == nil {
 		result.Header = make(http.Header)
 	}
@@ -123,8 +146,12 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	flusher, _ := w.(http.Flusher)
 	for stream.Next() {
 		event := stream.Event()
-		if result.FirstTokenMs == 0 {
-			result.FirstTokenMs = time.Since(start).Milliseconds()
+		elapsedMs := time.Since(start).Milliseconds()
+		if result.FirstEventMs == 0 {
+			result.FirstEventMs = elapsedMs
+		}
+		if result.FirstTokenMs == 0 && isContentStreamEvent(event) {
+			result.FirstTokenMs = elapsedMs
 		}
 		result.StreamStarted = true
 		if err := writeStreamEvent(w, req, event); err != nil {
@@ -153,11 +180,35 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		result.ErrorType = classifyError(streamErr)
 		if !result.StreamStarted {
 			errResult, _ := apiErrorResult(streamErr, result.LatencyMs)
+			applyUpstreamTiming(errResult, preparationMs, trace)
 			return errResult, nil
 		}
 		return result, streamErr
 	}
 	return result, nil
+}
+
+func applyUpstreamTiming(result *ProxyResult, preparationMs int64, trace *upstreamRequestTrace) {
+	if result == nil {
+		return
+	}
+	timing := trace.snapshot()
+	result.PreparationMs = preparationMs
+	result.DNSMs = timing.DNSMs
+	result.ConnectMs = timing.ConnectMs
+	result.TLSHandshakeMs = timing.TLSHandshakeMs
+	result.UpstreamHeaderMs = timing.UpstreamHeaderMs
+	result.ConnectionReused = timing.ConnectionReused
+	result.ConnectionTraced = timing.GotConnection
+}
+
+func isContentStreamEvent(event openai.StreamEvent) bool {
+	switch event.Type {
+	case openai.EventResponseOutputTextDelta, openai.EventResponseFunctionArgumentsDelta:
+		return true
+	default:
+		return strings.HasPrefix(event.Type, "response.reasoning") && strings.HasSuffix(event.Type, ".delta")
+	}
 }
 
 func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
@@ -252,7 +303,7 @@ func apiErrorResult(err error, latencyMs int64) (*ProxyResult, error) {
 	if marshalErr != nil {
 		return nil, marshalErr
 	}
-	return &ProxyResult{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, ErrorType: errorType, FirstTokenMs: latencyMs, LatencyMs: latencyMs}, nil
+	return &ProxyResult{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, ErrorType: errorType, LatencyMs: latencyMs}, nil
 }
 
 func classifyError(err error) string {

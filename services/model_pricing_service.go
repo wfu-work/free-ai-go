@@ -140,7 +140,6 @@ func (s ModelPricingService) SyncOfficial(ctx context.Context) (ModelPricingSync
 	if err != nil {
 		return ModelPricingSyncResult{}, err
 	}
-	httpClient.Timeout = officialPricingSyncTimeout
 	syncContext, cancel := context.WithTimeout(ctx, officialPricingSyncTimeout)
 	defer cancel()
 

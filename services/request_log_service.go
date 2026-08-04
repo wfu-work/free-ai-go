@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,22 +28,50 @@ type UsageDimension struct {
 	CostAmount   float64 `json:"costAmount" gorm:"-"`
 }
 
+// UsageTimelinePoint 是用量趋势中的一个时间桶。
+type UsageTimelinePoint struct {
+	BucketStart  int64   `json:"bucketStart"`
+	Requests     int64   `json:"requests"`
+	Failures     int64   `json:"failures"`
+	InputTokens  int64   `json:"inputTokens"`
+	OutputTokens int64   `json:"outputTokens"`
+	CachedTokens int64   `json:"cachedTokens"`
+	CostMicrousd int64   `json:"costMicrousd"`
+	CostAmount   float64 `json:"costAmount"`
+}
+
+// ModelUsageTimelinePoint 是一个模型在指定时间桶内的调用统计。
+type ModelUsageTimelinePoint struct {
+	BucketStart int64 `json:"bucketStart"`
+	Requests    int64 `json:"requests"`
+	Failures    int64 `json:"failures"`
+}
+
+// ModelUsageTimelineSeries 是一个模型的连续调用趋势。
+type ModelUsageTimelineSeries struct {
+	Model         string                    `json:"model"`
+	TotalRequests int64                     `json:"totalRequests"`
+	Points        []ModelUsageTimelinePoint `json:"points"`
+}
+
 // UsageSummary 是一个时间窗口内的完整请求用量汇总。
 type UsageSummary struct {
-	Since           int64            `json:"since"`
-	Until           int64            `json:"until"`
-	TotalRequests   int64            `json:"totalRequests"`
-	SuccessRequests int64            `json:"successRequests"`
-	FailedRequests  int64            `json:"failedRequests"`
-	AvgLatencyMs    float64          `json:"avgLatencyMs"`
-	InputTokens     int64            `json:"inputTokens"`
-	OutputTokens    int64            `json:"outputTokens"`
-	CachedTokens    int64            `json:"cachedTokens"`
-	CostMicrousd    int64            `json:"costMicrousd"`
-	CostAmount      float64          `json:"costAmount"`
-	Models          []UsageDimension `json:"models"`
-	Accounts        []UsageDimension `json:"accounts"`
-	PlatformKeys    []UsageDimension `json:"platformKeys"`
+	Since           int64                      `json:"since"`
+	Until           int64                      `json:"until"`
+	TotalRequests   int64                      `json:"totalRequests"`
+	SuccessRequests int64                      `json:"successRequests"`
+	FailedRequests  int64                      `json:"failedRequests"`
+	AvgLatencyMs    float64                    `json:"avgLatencyMs"`
+	InputTokens     int64                      `json:"inputTokens"`
+	OutputTokens    int64                      `json:"outputTokens"`
+	CachedTokens    int64                      `json:"cachedTokens"`
+	CostMicrousd    int64                      `json:"costMicrousd"`
+	CostAmount      float64                    `json:"costAmount"`
+	Models          []UsageDimension           `json:"models"`
+	Accounts        []UsageDimension           `json:"accounts"`
+	PlatformKeys    []UsageDimension           `json:"platformKeys"`
+	Timeline        []UsageTimelinePoint       `json:"timeline"`
+	ModelTimeline   []ModelUsageTimelineSeries `json:"modelTimeline"`
 }
 
 type RequestLogInput struct {
@@ -64,7 +93,15 @@ type RequestLogInput struct {
 	SwitchCount       int
 	SwitchReason      string
 	LatencyMs         int64
+	PreparationMs     int64
+	DNSMs             int64
+	ConnectMs         int64
+	TLSHandshakeMs    int64
+	UpstreamHeaderMs  int64
+	FirstEventMs      int64
 	FirstTokenMs      int64
+	ConnectionReused  bool
+	ConnectionTraced  bool
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64
@@ -97,7 +134,15 @@ func (s RequestLogService) Record(input RequestLogInput) error {
 		SwitchCount:       input.SwitchCount,
 		SwitchReason:      input.SwitchReason,
 		LatencyMs:         input.LatencyMs,
+		PreparationMs:     input.PreparationMs,
+		DNSMs:             input.DNSMs,
+		ConnectMs:         input.ConnectMs,
+		TLSHandshakeMs:    input.TLSHandshakeMs,
+		UpstreamHeaderMs:  input.UpstreamHeaderMs,
+		FirstEventMs:      input.FirstEventMs,
 		FirstTokenMs:      input.FirstTokenMs,
+		ConnectionReused:  input.ConnectionReused,
+		ConnectionTraced:  input.ConnectionTraced,
 		InputTokens:       input.InputTokens,
 		CachedInputTokens: input.CachedInputTokens,
 		OutputTokens:      input.OutputTokens,
@@ -267,6 +312,10 @@ func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error
 	if err != nil {
 		return UsageSummary{}, err
 	}
+	timeline, modelTimeline, err := queryUsageTimeline(db, since, until, models)
+	if err != nil {
+		return UsageSummary{}, err
+	}
 	success := totals.TotalRequests - totals.FailedRequests
 	if success < 0 {
 		success = 0
@@ -278,7 +327,136 @@ func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error
 		InputTokens:  totals.InputTokens, OutputTokens: totals.OutputTokens, CachedTokens: totals.CachedTokens,
 		CostMicrousd: totals.CostMicrousd, CostAmount: microusdToUSD(totals.CostMicrousd),
 		Models: models, Accounts: accounts, PlatformKeys: platformKeys,
+		Timeline: timeline, ModelTimeline: modelTimeline,
 	}, nil
+}
+
+type usageTimelineRow struct {
+	CreatedAtUnix int64  `gorm:"column:created_at_unix"`
+	Model         string `gorm:"column:model"`
+	Failed        int64  `gorm:"column:failed"`
+	InputTokens   int64  `gorm:"column:input_tokens"`
+	OutputTokens  int64  `gorm:"column:output_tokens"`
+	CachedTokens  int64  `gorm:"column:cached_tokens"`
+	CostMicrousd  int64  `gorm:"column:cost_microusd"`
+}
+
+// queryUsageTimeline 按时间窗口生成连续趋势点。最多返回 90 个点，避免长周期数据拖慢管理端渲染。
+func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension) ([]UsageTimelinePoint, []ModelUsageTimelineSeries, error) {
+	const maxBuckets = 90
+	dayMs := (24 * time.Hour).Milliseconds()
+	duration := until - since
+	if duration <= 0 {
+		duration = dayMs
+	}
+
+	bucketCount := int((duration + dayMs - 1) / dayMs)
+	if bucketCount < 1 {
+		bucketCount = 1
+	}
+	bucketSize := dayMs
+	if bucketCount > maxBuckets {
+		bucketCount = maxBuckets
+		bucketSize = (duration + int64(bucketCount) - 1) / int64(bucketCount)
+	}
+
+	points := make([]UsageTimelinePoint, bucketCount)
+	for i := range points {
+		points[i].BucketStart = since + int64(i)*bucketSize
+	}
+	modelSeries, modelIndexes, otherModelIndex := newModelUsageTimeline(models, points)
+
+	rows, err := db.Select(`
+		created_at_unix,
+		model,
+		CASE WHEN status_code >= 400 OR error_type <> '' THEN 1 ELSE 0 END AS failed,
+		input_tokens,
+		output_tokens,
+		cached_input_tokens AS cached_tokens,
+		cost_microusd`).Rows()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var row usageTimelineRow
+		if err := db.ScanRows(rows, &row); err != nil {
+			return nil, nil, err
+		}
+		index := int((row.CreatedAtUnix - since) / bucketSize)
+		if index < 0 {
+			continue
+		}
+		if index >= len(points) {
+			index = len(points) - 1
+		}
+
+		point := &points[index]
+		point.Requests++
+		point.Failures += row.Failed
+		point.InputTokens += row.InputTokens
+		point.OutputTokens += row.OutputTokens
+		point.CachedTokens += row.CachedTokens
+		point.CostMicrousd += row.CostMicrousd
+
+		model := strings.TrimSpace(row.Model)
+		if model == "" {
+			model = "未标识"
+		}
+		seriesIndex, exists := modelIndexes[model]
+		if !exists && otherModelIndex >= 0 {
+			seriesIndex, exists = otherModelIndex, true
+		}
+		if exists {
+			series := &modelSeries[seriesIndex]
+			series.TotalRequests++
+			series.Points[index].Requests++
+			series.Points[index].Failures += row.Failed
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	for i := range points {
+		points[i].CostAmount = microusdToUSD(points[i].CostMicrousd)
+	}
+	if otherModelIndex >= 0 && modelSeries[otherModelIndex].TotalRequests == 0 {
+		modelSeries = modelSeries[:otherModelIndex]
+	}
+	return points, modelSeries, nil
+}
+
+// newModelUsageTimeline 初始化调用量最高的 5 个模型，并为剩余模型预留“其他”系列。
+func newModelUsageTimeline(models []UsageDimension, points []UsageTimelinePoint) ([]ModelUsageTimelineSeries, map[string]int, int) {
+	const maxModels = 5
+	count := len(models)
+	if count > maxModels {
+		count = maxModels
+	}
+	series := make([]ModelUsageTimelineSeries, 0, count+1)
+	indexes := make(map[string]int, count+1)
+	newSeries := func(model string) ModelUsageTimelineSeries {
+		modelPoints := make([]ModelUsageTimelinePoint, len(points))
+		for i := range modelPoints {
+			modelPoints[i].BucketStart = points[i].BucketStart
+		}
+		return ModelUsageTimelineSeries{Model: model, Points: modelPoints}
+	}
+	appendSeries := func(model string) {
+		indexes[model] = len(series)
+		series = append(series, newSeries(model))
+	}
+	for i := 0; i < count; i++ {
+		appendSeries(models[i].Dimension)
+	}
+	otherIndex := -1
+	if len(models) > maxModels {
+		otherIndex = len(series)
+		series = append(series, newSeries("其他"))
+	}
+	return series, indexes, otherIndex
 }
 
 func queryUsageDimensions(db *gorm.DB, column string) ([]UsageDimension, error) {
