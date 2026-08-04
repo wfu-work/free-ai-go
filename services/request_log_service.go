@@ -288,9 +288,14 @@ func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error
 	if since <= 0 || since > until {
 		since = until - 30*24*time.Hour.Milliseconds()
 	}
-	db := global.NAV_DB.Model(&domains.RequestLog{}).Where("created_at_unix >= ? AND created_at_unix <= ?", since, until)
+	// 每个聚合步骤都必须使用独立查询。GORM 的 Select、Group、Order 会保存在
+	// 当前 Statement 中；复用同一个查询会把维度统计的 requests 排序带入趋势查询。
+	newUsageQuery := func() *gorm.DB {
+		return global.NAV_DB.Model(&domains.RequestLog{}).
+			Where("created_at_unix >= ? AND created_at_unix <= ?", since, until)
+	}
 	var totals usageTotalsRow
-	if err := db.Select(`
+	if err := newUsageQuery().Select(`
 		COUNT(*) AS total_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 OR error_type <> '' THEN 1 ELSE 0 END), 0) AS failed_requests,
 		COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
@@ -300,19 +305,19 @@ func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error
 		COALESCE(SUM(cost_microusd), 0) AS cost_microusd`).Scan(&totals).Error; err != nil {
 		return UsageSummary{}, err
 	}
-	models, err := queryUsageDimensions(db, "model")
+	models, err := queryUsageDimensions(newUsageQuery(), "model")
 	if err != nil {
 		return UsageSummary{}, err
 	}
-	accounts, err := queryUsageDimensions(db, "account_name")
+	accounts, err := queryUsageDimensions(newUsageQuery(), "account_name")
 	if err != nil {
 		return UsageSummary{}, err
 	}
-	platformKeys, err := queryUsageDimensions(db, "key_prefix")
+	platformKeys, err := queryUsageDimensions(newUsageQuery(), "key_prefix")
 	if err != nil {
 		return UsageSummary{}, err
 	}
-	timeline, modelTimeline, err := queryUsageTimeline(db, since, until, models)
+	timeline, modelTimeline, err := queryUsageTimeline(newUsageQuery(), since, until, models)
 	if err != nil {
 		return UsageSummary{}, err
 	}
