@@ -240,6 +240,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
