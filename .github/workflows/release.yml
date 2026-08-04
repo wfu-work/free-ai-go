@@ -143,6 +143,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           New-Item -ItemType Directory -Force -Path "bin/${env:GOOS}-${env:GOARCH}" | Out-Null
+          go mod download
           $buildOutput = & go build `
             -trimpath `
             -ldflags "-s -w" `
@@ -151,7 +152,7 @@ jobs:
           $exitCode = $LASTEXITCODE
           $buildOutput | ForEach-Object { Write-Host $_ }
           if ($exitCode -ne 0) {
-            $message = ($buildOutput | Out-String).Trim()
+            $message = ($buildOutput | Select-Object -Last 80 | Out-String).Trim()
             $escaped = $message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
             Write-Host "::error title=Windows CGO build failed::${escaped}"
             exit $exitCode
