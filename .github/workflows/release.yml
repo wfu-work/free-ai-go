@@ -77,14 +77,14 @@ jobs:
           - goos: windows
             goarch: amd64
             runner: windows-2025
-            cc: C:/msys64/clang64/bin/clang.exe
+            compiler_dir: clang64
             msystem: CLANG64
             toolchain: mingw-w64-clang-x86_64-toolchain
             archive: zip
           - goos: windows
             goarch: arm64
             runner: windows-11-arm
-            cc: C:/msys64/clangarm64/bin/clang.exe
+            compiler_dir: clangarm64
             msystem: CLANGARM64
             toolchain: mingw-w64-clang-aarch64-toolchain
             archive: zip
@@ -139,11 +139,29 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CC: ${{ matrix.cc }}
+          MSYS2_COMPILER_DIR: ${{ matrix.compiler_dir }}
         run: |
           $ErrorActionPreference = "Stop"
 
           New-Item -ItemType Directory -Force -Path "bin/${env:GOOS}-${env:GOARCH}" | Out-Null
+          $roots = @(
+            "C:\msys64",
+            (Join-Path $env:RUNNER_TEMP "msys64"),
+            (Join-Path $env:RUNNER_TOOL_CACHE "msys64")
+          )
+          $compiler = $null
+          foreach ($root in $roots) {
+            if (-not (Test-Path $root)) { continue }
+            $compiler = Get-ChildItem -LiteralPath $root -Filter "clang.exe" -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\${env:MSYS2_COMPILER_DIR}\\bin\\clang\.exe$" } |
+              Select-Object -First 1
+            if ($compiler) { break }
+          }
+          if (-not $compiler) {
+            throw "MSYS2 clang.exe was not found for ${env:MSYS2_COMPILER_DIR}"
+          }
+          $env:CC = $compiler.FullName
+          Write-Host "Using C compiler: $env:CC"
           go mod download
           $buildOutput = & go build `
             -trimpath `
