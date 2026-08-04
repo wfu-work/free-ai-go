@@ -77,9 +77,9 @@ jobs:
           - goos: windows
             goarch: amd64
             runner: windows-2025
-            cc: C:/msys64/mingw64/bin/gcc.exe
-            msystem: MINGW64
-            toolchain: mingw-w64-x86_64-toolchain
+            cc: C:/msys64/clang64/bin/clang.exe
+            msystem: CLANG64
+            toolchain: mingw-w64-clang-x86_64-toolchain
             archive: zip
           - goos: windows
             goarch: arm64
@@ -143,11 +143,19 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           New-Item -ItemType Directory -Force -Path "bin/${env:GOOS}-${env:GOARCH}" | Out-Null
-          go build `
+          $buildOutput = & go build `
             -trimpath `
             -ldflags "-s -w" `
             -o "bin/${env:GOOS}-${env:GOARCH}/${env:APP}.exe" `
-            .
+            . 2>&1
+          $exitCode = $LASTEXITCODE
+          $buildOutput | ForEach-Object { Write-Host $_ }
+          if ($exitCode -ne 0) {
+            $message = ($buildOutput | Out-String).Trim()
+            $escaped = $message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Host "::error title=Windows CGO build failed::${escaped}"
+            exit $exitCode
+          }
 
       - name: Package Unix executable
         if: matrix.goos != 'windows'
