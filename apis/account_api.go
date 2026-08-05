@@ -46,6 +46,22 @@ func (a AccountApi) AddManual(c *gin.Context) {
 	accountService.SyncOfficialAccountAsync(account.Guid)
 }
 
+// AddAPIKey 添加独立 OpenAI Platform 图片 API 账号。
+// API Key 请求体不经过日志中间件，响应不会返回明文凭据。
+func (a AccountApi) AddAPIKey(c *gin.Context) {
+	var input services.APIKeyAccountInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	account, err := accountService.AddAPIKey(c.Request.Context(), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(account, c)
+}
+
 // StartOAuth 创建浏览器 PKCE 或设备码官方授权会话。
 func (a AccountApi) StartOAuth(c *gin.Context) {
 	var input services.AccountOAuthStartInput

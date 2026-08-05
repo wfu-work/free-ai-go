@@ -12,6 +12,8 @@ type Account struct {
 	ChatGPTAccountID      string `json:"chatgptAccountId" gorm:"size:120;index;comment:ChatGPT账号ID"`
 	WorkspaceID           string `json:"workspaceId" gorm:"size:120;index;comment:工作区ID"`
 	EncryptedAccountFile  string `json:"-" gorm:"comment:加密OAuth账号文件"`
+	EncryptedAPIKey       string `json:"-" gorm:"comment:加密OpenAI API Key"`
+	CredentialHash        string `json:"-" gorm:"size:64;index;comment:凭据指纹"`
 	CredentialHint        string `json:"credentialHint" gorm:"size:120;comment:账号凭据提示"`
 	PlanType              string `json:"planType" gorm:"size:80;index;comment:账号套餐"`
 	SubscriptionPlan      string `json:"subscriptionPlan" gorm:"size:120;comment:订阅套餐"`

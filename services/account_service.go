@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/wfu-work/proxy-api-lib/catalog"
 	"github.com/wfu-work/proxy-api-lib/chatgpt"
 	"github.com/wfu-work/proxy-api-lib/codexauth"
+	"github.com/wfu-work/proxy-api-lib/openai"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
@@ -58,6 +60,13 @@ type ManualAccountInput struct {
 	RefreshToken string `json:"refreshToken"`
 	IDToken      string `json:"idToken"`
 	AccountID    string `json:"accountId"`
+	AccountPoolInput
+}
+
+// APIKeyAccountInput 添加一个独立的 OpenAI Platform 图片 API 账号。
+// API Key 只在创建时接收，后续接口不会返回明文。
+type APIKeyAccountInput struct {
+	APIKey string `json:"apiKey"`
 	AccountPoolInput
 }
 
@@ -182,6 +191,96 @@ func (s AccountService) AddManual(ctx context.Context, input ManualAccountInput)
 	return s.upsertOfficialAccount(file, pool, "account.manual")
 }
 
+// AddAPIKey 验证并加密保存 OpenAI Platform API Key，同时同步该项目可见的图片模型。
+func (s AccountService) AddAPIKey(ctx context.Context, input APIKeyAccountInput) (domains.Account, error) {
+	pool, err := normalizeOpenAIImagePool(input.AccountPoolInput)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	apiKey := strings.TrimSpace(input.APIKey)
+	if len(apiKey) < 20 {
+		return domains.Account{}, errors.New("a valid OpenAI API key is required")
+	}
+	models, err := OpenAIImageServiceApp.ListModels(ctx, apiKey)
+	if err != nil {
+		return domains.Account{}, fmt.Errorf("validate OpenAI image API key: %w", err)
+	}
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	encrypted, err := utils.EncryptSecret(apiKey)
+	if err != nil {
+		return domains.Account{}, err
+	}
+	credentialHash := utils.SHA256Hex(apiKey)
+	hint := apiKeyCredentialHint(apiKey)
+	name := strings.TrimSpace(pool.Name)
+	if name == "" {
+		name = "OpenAI Images · " + hint
+	}
+	if pool.Weight <= 0 {
+		pool.Weight = 1
+	}
+	group := normalizeAccountGroupName(pool.AccountGroup)
+	var account domains.Account
+	findErr := global.NAV_DB.Where(
+		"vendor_code = ? AND product_code = ? AND credential_hash = ?",
+		domains.VendorOpenAI, domains.ProductOpenAIImages, credentialHash,
+	).First(&account).Error
+	if findErr == nil {
+		oldGroup := account.AccountGroup
+		if err := global.NAV_DB.Model(&account).Updates(map[string]any{
+			"credential_type": domains.CredentialAPIKey, "name": name,
+			"encrypted_api_key": encrypted, "credential_hint": hint,
+			"account_group": group, "priority": pool.Priority, "weight": pool.Weight,
+			"remark": pool.Remark, "enabled": true, "status": domains.AccountStatusAvailable,
+			"token_status": domains.TokenStatusActive, "last_error": "",
+		}).Error; err != nil {
+			return domains.Account{}, err
+		}
+		AccountGroupServiceApp.RefreshSummaries(oldGroup, group)
+		AuditServiceApp.Record("", "account.api_key.update", "account", account.Guid, nil)
+		account, err = s.GetByGuid(account.Guid)
+	} else {
+		if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return domains.Account{}, findErr
+		}
+		account = domains.Account{
+			VendorCode: domains.VendorOpenAI, ProductCode: domains.ProductOpenAIImages,
+			CredentialType: domains.CredentialAPIKey, Name: name,
+			EncryptedAPIKey: encrypted, CredentialHash: credentialHash, CredentialHint: hint,
+			PlanType: "api", SubscriptionPlan: "usage_based", TokenStatus: domains.TokenStatusActive,
+			AccountGroup: group, Status: domains.AccountStatusAvailable,
+			Priority: pool.Priority, Weight: pool.Weight, Enabled: true, Remark: pool.Remark,
+		}
+		if err := global.NAV_DB.Create(&account).Error; err != nil {
+			return domains.Account{}, err
+		}
+		AccountGroupServiceApp.RefreshSummaries(group)
+		AuditServiceApp.Record("", "account.api_key", "account", account.Guid, nil)
+	}
+	if err != nil {
+		return domains.Account{}, err
+	}
+	identity := catalog.SourceIdentity{
+		Vendor: domains.VendorOpenAI, Product: domains.ProductOpenAIImages, Protocol: domains.ProtocolOpenAIImages,
+	}
+	if _, err := ModelServiceApp.SyncRemoteModels(account, identity, models); err != nil {
+		return domains.Account{}, err
+	}
+	_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+		"last_refreshed_at": time.Now().UnixMilli(), "last_error": "", "status": domains.AccountStatusAvailable,
+	}).Error
+	return s.GetByGuid(account.Guid)
+}
+
+func normalizeOpenAIImagePool(pool AccountPoolInput) (AccountPoolInput, error) {
+	vendor := strings.ToLower(strings.TrimSpace(pool.VendorCode))
+	if vendor != "" && vendor != domains.VendorOpenAI {
+		return AccountPoolInput{}, errors.New("OpenAI image API accounts require vendorCode=openai")
+	}
+	pool.VendorCode = domains.VendorOpenAI
+	return pool, nil
+}
+
 func normalizeOpenAICodexPool(pool AccountPoolInput) (AccountPoolInput, error) {
 	vendorCode, productCode, err := normalizeOfficialAccountIdentity(pool.VendorCode)
 	if err != nil {
@@ -282,6 +381,16 @@ func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool 
 // SyncOfficialAccountAsync 在账号入池后异步同步额度、订阅和官方模型目录。
 func (s AccountService) SyncOfficialAccountAsync(guid string) {
 	go func() {
+		account, err := s.GetByGuid(guid)
+		if err != nil {
+			return
+		}
+		if account.ProductCode == domains.ProductOpenAIImages {
+			if _, err := s.FetchModels(FetchAccountModelsInput{Guid: guid}); err != nil {
+				global.NAV_LOG.Warn("sync added image API models failed", zap.String("accountGuid", guid), zap.Error(err))
+			}
+			return
+		}
 		if _, err := s.RefreshUsage(guid); err != nil {
 			global.NAV_LOG.Warn("sync added account usage failed", zap.String("accountGuid", guid), zap.Error(err))
 		}
@@ -300,9 +409,17 @@ func (s AccountService) Update(guid string, input UpdateAccountInput) (domains.A
 	if requestedVendor == "" {
 		requestedVendor = account.VendorCode
 	}
-	vendorCode, productCode, err := normalizeOfficialAccountIdentity(requestedVendor)
-	if err != nil {
-		return domains.Account{}, err
+	vendorCode := account.VendorCode
+	productCode := account.ProductCode
+	if account.ProductCode == domains.ProductOpenAIImages {
+		if requestedVendor != domains.VendorOpenAI {
+			return domains.Account{}, errors.New("image API account vendor cannot be changed")
+		}
+	} else {
+		vendorCode, productCode, err = normalizeOfficialAccountIdentity(requestedVendor)
+		if err != nil {
+			return domains.Account{}, err
+		}
 	}
 	if input.Weight <= 0 {
 		input.Weight = 1
@@ -329,6 +446,9 @@ func (s AccountService) Export(guid string) ([]byte, domains.Account, error) {
 	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return nil, domains.Account{}, err
+	}
+	if account.CredentialType == domains.CredentialAPIKey {
+		return nil, account, errors.New("API key accounts cannot be exported")
 	}
 	file, err := s.LoadAccountFile(account)
 	if err != nil {
@@ -375,7 +495,7 @@ func (s AccountService) List(params map[string]string) (list interface{}, total 
 	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("name LIKE ? OR email LIKE ? OR chat_gpt_account_id LIKE ? OR remark LIKE ?", like, like, like, like)
+		db = db.Where("name LIKE ? OR email LIKE ? OR chat_gpt_account_id LIKE ? OR credential_hint LIKE ? OR remark LIKE ?", like, like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -481,6 +601,30 @@ func (s AccountService) syncAccountModelsOnce(accountGuid string) (ModelSyncStat
 	}
 	ctx, cancel := contextWithOptionalTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
+	if account.ProductCode == domains.ProductOpenAIImages {
+		apiKey, err := s.LoadAPIKey(account)
+		if err != nil {
+			return ModelSyncStats{}, err
+		}
+		models, err := OpenAIImageServiceApp.ListModels(ctx, apiKey)
+		if err != nil {
+			ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
+			return ModelSyncStats{}, err
+		}
+		identity := catalog.SourceIdentity{
+			Vendor: domains.VendorOpenAI, Product: domains.ProductOpenAIImages, Protocol: domains.ProtocolOpenAIImages,
+		}
+		result, err := ModelServiceApp.SyncRemoteModels(account, identity, models)
+		if err != nil {
+			ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
+			return ModelSyncStats{}, err
+		}
+		_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+			"last_refreshed_at": time.Now().UnixMilli(), "last_error": "",
+			"status": domains.AccountStatusAvailable, "token_status": domains.TokenStatusActive,
+		}).Error
+		return result, nil
+	}
 	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
 		return ModelSyncStats{}, err
@@ -517,9 +661,10 @@ func (s AccountService) fetchModelsWithFile(ctx context.Context, account domains
 // SyncModels 同步单个账号或全部启用官方账号的模型目录。
 func (s AccountService) SyncModels(input ModelSyncInput) (ModelSyncSweepResult, error) {
 	var accounts []domains.Account
-	query := global.NAV_DB.Where("enabled = ? AND encrypted_account_file <> ?", true, "")
+	query := global.NAV_DB.Where("enabled = ? AND ((credential_type = ? AND encrypted_account_file <> ?) OR (credential_type = ? AND encrypted_api_key <> ?))",
+		true, domains.CredentialOAuth, "", domains.CredentialAPIKey, "")
 	if guid := strings.TrimSpace(input.AccountGuid); guid != "" {
-		query = global.NAV_DB.Where("guid = ?", guid)
+		query = query.Where("guid = ?", guid)
 	}
 	if vendor := strings.TrimSpace(input.VendorCode); vendor != "" {
 		query = query.Where("vendor_code = ?", vendor)
@@ -549,6 +694,17 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return RefreshUsageResult{}, err
+	}
+	if account.ProductCode == domains.ProductOpenAIImages {
+		stats, err := s.syncAccountModels(account.Guid)
+		if err != nil {
+			s.recordSyncFailure(account, err)
+			return RefreshUsageResult{}, err
+		}
+		return RefreshUsageResult{
+			AccountGuid: account.Guid, UsageType: "openai_api_model_access", PlanType: "api",
+			Quotas: []domains.AccountQuota{}, Raw: map[string]any{"models": stats.Models},
+		}, nil
 	}
 	ctx, cancel := contextWithOptionalTimeout(context.Background(), Config().RequestTimeout())
 	defer cancel()
@@ -627,6 +783,26 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	if account.ProductCode == domains.ProductOpenAIImages {
+		started := time.Now()
+		stats, probeErr := s.syncAccountModels(account.Guid)
+		if probeErr != nil {
+			return map[string]any{
+				"ok": false, "statusCode": imageProbeStatus(probeErr),
+				"errorType": classifyError(probeErr), "errorSummary": proxyErrorSummary(probeErr),
+				"latencyMs": time.Since(started).Milliseconds(),
+			}, nil
+		}
+		model := strings.TrimSpace(input.Model)
+		if model == "" && len(stats.Models) > 0 {
+			model = stats.Models[0]
+		}
+		_ = s.MarkUsed(account.Guid)
+		return map[string]any{
+			"ok": true, "statusCode": http.StatusOK, "model": model,
+			"latencyMs": time.Since(started).Milliseconds(), "quotas": []domains.AccountQuota{},
+		}, nil
+	}
 	model := strings.TrimSpace(input.Model)
 	if model == "" {
 		model, _ = ModelServiceApp.FirstAvailableModelForAccount(account.Guid)
@@ -674,7 +850,8 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 
 func (s AccountService) RefreshDueUsageAccounts() (UsageRefreshSweepResult, error) {
 	var accounts []domains.Account
-	if err := global.NAV_DB.Where("enabled = ?", true).Order("last_refreshed_at asc").Find(&accounts).Error; err != nil {
+	if err := global.NAV_DB.Where("enabled = ? AND product_code = ?", true, domains.ProductCodex).
+		Order("last_refreshed_at asc").Find(&accounts).Error; err != nil {
 		return UsageRefreshSweepResult{}, err
 	}
 	now := time.Now()
@@ -794,7 +971,8 @@ func accountFailureState(account domains.Account, errorType string, policy Accou
 func (s AccountService) MarkExpiredSubscriptions() error {
 	now := time.Now().UnixMilli()
 	return global.NAV_DB.Model(&domains.Account{}).
-		Where("enabled = ? AND subscription_will_renew = ? AND subscription_expired_at > 0 AND subscription_expired_at <= ?", true, false, now).
+		Where("enabled = ? AND product_code = ? AND subscription_will_renew = ? AND subscription_expired_at > 0 AND subscription_expired_at <= ?",
+			true, domains.ProductCodex, false, now).
 		Update("status", domains.AccountStatusExpired).Error
 }
 
@@ -803,10 +981,11 @@ func (s AccountService) FindAvailable(accountGroup, model string, limit int) ([]
 		limit = 100
 	}
 	now := time.Now().UnixMilli()
-	query := global.NAV_DB.Where("enabled = ? AND encrypted_account_file <> ? AND status NOT IN ?", true, "", []string{
-		domains.AccountStatusDisabled, domains.AccountStatusLimited, domains.AccountStatusCooldown,
-		domains.AccountStatusExpired, domains.AccountStatusInvalid, domains.AccountStatusExhausted,
-	}).Where("(cooldown_until = 0 OR cooldown_until < ?)", now).
+	query := global.NAV_DB.Where("enabled = ? AND ((credential_type = ? AND encrypted_account_file <> ?) OR (credential_type = ? AND encrypted_api_key <> ?)) AND status NOT IN ?",
+		true, domains.CredentialOAuth, "", domains.CredentialAPIKey, "", []string{
+			domains.AccountStatusDisabled, domains.AccountStatusLimited, domains.AccountStatusCooldown,
+			domains.AccountStatusExpired, domains.AccountStatusInvalid, domains.AccountStatusExhausted,
+		}).Where("(cooldown_until = 0 OR cooldown_until < ?)", now).
 		Where("(subscription_expired_at = 0 OR subscription_expired_at > ? OR subscription_will_renew = ?)", now, true)
 	if accountGroup != "" {
 		query = query.Where("account_group = ?", accountGroup)
@@ -839,6 +1018,22 @@ func (s AccountService) LoadAccountFile(account domains.Account) (*codexauth.Acc
 		return nil, err
 	}
 	return codexauth.ParseAccountFile([]byte(plaintext))
+}
+
+// LoadAPIKey 仅供服务端上游调用解密图片 API Key；不得写入日志或返回管理端。
+func (s AccountService) LoadAPIKey(account domains.Account) (string, error) {
+	if account.CredentialType != domains.CredentialAPIKey || strings.TrimSpace(account.EncryptedAPIKey) == "" {
+		return "", &openai.APIError{StatusCode: http.StatusUnauthorized, Type: "invalid_api_key", Message: "account does not contain an OpenAI API key"}
+	}
+	utils.SetSecretKeyFile(Config().SecretKeyFile)
+	value, err := utils.DecryptSecret(account.EncryptedAPIKey)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(value) == "" {
+		return "", &openai.APIError{StatusCode: http.StatusUnauthorized, Type: "invalid_api_key", Message: "OpenAI API key is empty"}
+	}
+	return strings.TrimSpace(value), nil
 }
 
 // ActiveAccountFile 在必要时刷新 Access Token，并原子保存轮换后的 Refresh Token。
@@ -1006,6 +1201,22 @@ func accountCredentialHint(accountID string) string {
 		return accountID
 	}
 	return accountID[:4] + "…" + accountID[len(accountID)-6:]
+}
+
+func apiKeyCredentialHint(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if len(apiKey) <= 12 {
+		return apiKey
+	}
+	return apiKey[:7] + "…" + apiKey[len(apiKey)-4:]
+}
+
+func imageProbeStatus(err error) int {
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode > 0 {
+		return apiErr.StatusCode
+	}
+	return http.StatusBadGateway
 }
 
 func normalizeUnixMillis(value int64) int64 {

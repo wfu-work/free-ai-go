@@ -1,6 +1,6 @@
 # FreeAiGo
 
-FreeAiGo 是一个基于 ChatGPT/Codex OAuth 登录账号的本地账号池和 OpenAI-compatible 网关。上游账号不使用 OpenAI Platform API Key，也不接受裸 Bearer Token、登录回调地址或自定义中转站配置。
+FreeAiGo 是一个本地多账号池和 OpenAI-compatible 网关。文本请求使用 ChatGPT/Codex OAuth 账号；图片生成使用独立 OpenAI Platform API Key。两类凭据、模型目录、上游端点和计费体系完全隔离，不接受自定义中转站配置。
 
 下游客户端仍通过 FreeAiGo 自己签发的“平台密钥”访问 `/v1`。平台密钥只用于保护本地网关，不会被发送给 ChatGPT 上游。
 
@@ -17,6 +17,12 @@ Codex OAuth 账号 JSON
              ├─ 正常响应头采样
              ├─ 主动最小请求探测
              └─ 本地请求日志、故障切换与账号调度
+
+OpenAI Platform API Key
+  └─ AES-GCM 加密存储
+      ├─ /v1/models                         验证项目并同步图片模型
+      └─ /v1/images/generations             图片生成请求
+             └─ 独立图片模型目录、账号调度和请求日志
 ```
 
 ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集中封装在相邻的 `proxy-api-lib/chatgpt` 与 `proxy-api-lib/codexauth` 包中，业务层不直接解析其原始 JSON。
@@ -25,6 +31,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 
 - 导入、更新和敏感导出规范 OAuth 账号文件。
 - 使用主密钥对完整账号文件进行 AES-GCM 加密。
+- 验证并加密保存 OpenAI Platform API Key，只同步该项目实际可见的图片模型。
 - Access Token 到期前自动刷新；Refresh Token 轮换后原子持久化。
 - 上游返回 401 时强制刷新并只重试一次。
 - 同步常见 5 小时、7 天以及 Code Review、Spark 等附加额度窗口。
@@ -37,7 +44,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 - 请求进入上游前事务预占平台 Token 额度，完成后按真实用量原子结算。
 - 按官方模型、服务等级、普通输入、缓存输入和输出 Token 估算参考成本。
 - 限制单请求大小和全局并发数；启用 Redis 后跨实例共享 RPM 限流和轮询游标。
-- 对下游提供 `/v1/models`、`/v1/chat/completions` 和 `/v1/responses`。
+- 对下游提供 `/v1/models`、`/v1/chat/completions`、`/v1/responses` 和 `/v1/images/generations`。
 
 不支持 `/v1/embeddings`，也没有手工写入账号额度的管理接口。账号额度只来自上游真实信号。
 
@@ -65,6 +72,12 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 ```
 
 相同 `account_id` 再次导入会更新原账号的加密凭据，不会创建重复账号。旧 API Key、裸 Token 或旧认证字段不会被猜测转换；迁移时没有规范 `encrypted_account_file` 的旧账号会被禁用。
+
+## 图片 API 账号
+
+图片账号只接受 OpenAI Platform API Key。添加时系统调用 OpenAI 官方 `/v1/models` 验证密钥并筛选图片模型，验证过程不会生成图片。API Key 使用主密钥加密保存，管理接口只返回脱敏凭据提示，不支持明文查询或导出。
+
+ChatGPT Pro 订阅不包含 OpenAI Platform API 额度。图片请求按 Platform 项目单独计费，并且只参与 `/v1/images/generations` 路由；Codex OAuth 账号不会被用于图片接口，图片 API Key 也不会被用于文本接口。当前网关不会把图片用量折算成文本 Token 成本或平台密钥 Token 额度，请在 OpenAI Platform 项目中设置预算和消费上限。
 
 ## 额度语义
 
@@ -100,15 +113,16 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/accounts/import` | 导入或更新 OAuth 账号文件 |
+| `POST` | `/api/accounts/api-key` | 验证并添加独立 OpenAI 图片 API Key |
 | `GET` | `/api/accounts/list` | 分页查询账号及额度窗口 |
 | `GET` | `/api/accounts/list/all` | 查询全部账号 |
 | `GET` | `/api/accounts/:guid` | 查询账号详情 |
 | `PUT` | `/api/accounts/:guid` | 更新账号组、模型与调度参数 |
 | `DELETE` | `/api/accounts/:guid` | 删除账号及其额度快照 |
 | `GET` | `/api/accounts/:guid/export` | 导出含令牌的规范账号文件 |
-| `POST` | `/api/accounts/:guid/refresh-usage` | 同步 wham、订阅与权益 |
-| `POST` | `/api/accounts/:guid/probe` | 最小 Codex 请求并采样响应头 |
-| `POST` | `/api/accounts/fetch-models` | 获取官方 Codex 模型清单 |
+| `POST` | `/api/accounts/:guid/refresh-usage` | OAuth 账号同步额度；图片账号验证密钥并同步模型 |
+| `POST` | `/api/accounts/:guid/probe` | OAuth 账号最小探测；图片账号仅验证模型访问权限 |
+| `POST` | `/api/accounts/fetch-models` | 获取账号对应的官方模型清单 |
 | `POST` | `/api/accounts/:guid/enable` | 启用账号 |
 | `POST` | `/api/accounts/:guid/disable` | 禁用账号 |
 | `POST` | `/api/accounts/reorder` | 更新优先级和权重 |
@@ -124,6 +138,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 GET  /v1/models
 POST /v1/chat/completions
 POST /v1/responses
+POST /v1/images/generations
 ```
 
 客户端使用本地平台密钥：
@@ -136,6 +151,15 @@ curl http://127.0.0.1:8787/v1/responses \
 ```
 
 这里的 `sk-...` 是 FreeAiGo 创建的下游访问凭据，不是上游 OpenAI API Key。
+
+图片生成同样使用 FreeAiGo 平台密钥，模型名称来自 `/v1/models` 或管理台中的图片模型目录：
+
+```bash
+curl http://127.0.0.1:8787/v1/images/generations \
+  -H "Authorization: Bearer sk-your-freeai-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-image-model","prompt":"A restrained blue product icon"}'
+```
 
 进程存活检查为 `GET /healthz`。部署就绪检查为 `GET /readyz`；只有数据库、可用官方账号、启用模型、启用平台密钥以及至少一组真实可路由组合都满足时才返回 HTTP 200，否则返回 HTTP 503 和未就绪原因。
 
@@ -184,6 +208,7 @@ go test ./...
 ## 安全边界
 
 - 只导入本人拥有或获授权使用的 OAuth 账号。
+- 只添加本人拥有或获授权使用的 OpenAI Platform API Key，并在 Platform 项目中配置合理的消费限额。
 - 不要把导出的账号 JSON、数据库、主密钥或日志发送给第三方。
 - `master.key` 与数据库必须一起备份；缺少其中任一项都无法恢复账号文件。
 - JWT 未验证解析只用于展示元信息和账号路由，不用于授权判断。

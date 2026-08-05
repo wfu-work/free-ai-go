@@ -163,8 +163,8 @@ func (s ModelPricingService) BackfillRequestCosts(limit int) (int, error) {
 	}
 	var logs []domains.RequestLog
 	if err := global.NAV_DB.Where(
-		"pricing_matched = ? AND upstream_model <> ? AND (input_tokens > ? OR output_tokens > ?)",
-		false, "", 0, 0,
+		"pricing_matched = ? AND path <> ? AND upstream_model <> ? AND (input_tokens > ? OR output_tokens > ?)",
+		false, "/v1/images/generations", "", 0, 0,
 	).Order("id asc").Limit(limit).Find(&logs).Error; err != nil {
 		return 0, err
 	}

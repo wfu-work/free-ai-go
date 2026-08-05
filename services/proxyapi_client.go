@@ -32,23 +32,25 @@ type ProxyUsage struct {
 }
 
 type ProxyResult struct {
-	StatusCode       int
-	Header           http.Header
-	Body             []byte
-	Usage            ProxyUsage
-	ErrorType        string
-	ErrorSummary     string
-	PreparationMs    int64
-	DNSMs            int64
-	ConnectMs        int64
-	TLSHandshakeMs   int64
-	UpstreamHeaderMs int64
-	FirstEventMs     int64
-	FirstTokenMs     int64
-	LatencyMs        int64
-	ConnectionReused bool
-	ConnectionTraced bool
-	StreamStarted    bool
+	StatusCode        int
+	Header            http.Header
+	Body              []byte
+	Usage             ProxyUsage
+	ErrorType         string
+	ErrorSummary      string
+	DiagnosticType    string
+	DiagnosticSummary string
+	PreparationMs     int64
+	DNSMs             int64
+	ConnectMs         int64
+	TLSHandshakeMs    int64
+	UpstreamHeaderMs  int64
+	FirstEventMs      int64
+	FirstTokenMs      int64
+	LatencyMs         int64
+	ConnectionReused  bool
+	ConnectionTraced  bool
+	StreamStarted     bool
 }
 
 type ProxyAPIClient interface {
@@ -61,6 +63,16 @@ type ProxyAPIClientImpl struct{}
 var ProxyAPIClientApp ProxyAPIClient = ProxyAPIClientImpl{}
 
 func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req ProxyRequest) (*ProxyResult, error) {
+	if req.Endpoint == "/v1/images/generations" {
+		if account.ProductCode != domains.ProductOpenAIImages || account.CredentialType != domains.CredentialAPIKey {
+			return unsupportedEndpointResult(req.Endpoint, req.Model)
+		}
+		req.Body = replaceProxyModel(req.Body, req.Model)
+		return OpenAIImageServiceApp.Generate(ctx, account, req.Body)
+	}
+	if account.ProductCode == domains.ProductOpenAIImages {
+		return unsupportedEndpointResult(req.Endpoint, req.Model)
+	}
 	start := time.Now()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
@@ -105,6 +117,9 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 }
 
 func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, req ProxyRequest, w io.Writer) (*ProxyResult, error) {
+	if account.ProductCode == domains.ProductOpenAIImages || req.Endpoint == "/v1/images/generations" {
+		return unsupportedEndpointResult(req.Endpoint, req.Model)
+	}
 	start := time.Now()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
@@ -147,6 +162,7 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	result.Header.Set("Connection", "keep-alive")
 	flusher, _ := w.(http.Flusher)
 	terminalEventType := ""
+	responseCompleted := false
 	for stream.Next() {
 		event := stream.Event()
 		if streamEventErrorType(event.Type) != "" {
@@ -171,16 +187,16 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		}
 		if completed, ok := event.CompletedResponse(); ok {
 			result.Usage = usageFromResponse(completed)
+			responseCompleted = true
 		}
 	}
 	streamErr := stream.Err()
 	if req.Endpoint == "/v1/chat/completions" && result.StreamStarted && streamErr == nil {
 		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
-			result.ErrorType = classifyDownstreamWriteError(err)
-			result.ErrorSummary = proxyErrorSummary(err)
-			return result, err
-		}
-		if flusher != nil {
+			if writeErr := applyStreamDoneWriteError(result, responseCompleted, err); writeErr != nil {
+				return result, writeErr
+			}
+		} else if flusher != nil {
 			flusher.Flush()
 		}
 	}
@@ -233,6 +249,36 @@ func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
 	default:
 		return openai.ResponseRequest{}, fmt.Errorf("Codex account pool does not support endpoint %s", req.Endpoint)
 	}
+}
+
+func replaceProxyModel(body []byte, model string) []byte {
+	if strings.TrimSpace(model) == "" {
+		return body
+	}
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return body
+	}
+	payload["model"] = strings.TrimSpace(model)
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func unsupportedEndpointResult(endpoint, model string) (*ProxyResult, error) {
+	err := fmt.Errorf("model %s does not support endpoint %s", strings.TrimSpace(model), strings.TrimSpace(endpoint))
+	body, marshalErr := json.Marshal(map[string]any{"error": map[string]any{
+		"message": err.Error(), "type": domains.ErrorModelNotSupported, "code": domains.ErrorModelNotSupported,
+	}})
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	return &ProxyResult{
+		StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}},
+		Body: body, ErrorType: domains.ErrorModelNotSupported, ErrorSummary: proxyErrorSummary(err),
+	}, nil
 }
 
 func usageFromResponse(resp *openai.Response) ProxyUsage {
@@ -363,6 +409,22 @@ func classifyDownstreamWriteError(err error) string {
 		return ""
 	}
 	return domains.ErrorClientDisconnected
+}
+
+// applyStreamDoneWriteError 只豁免已收到 response.completed 后最终 [DONE] 标记的写入失败。
+// 完成事件之前的任何下游写入失败仍然是 client_disconnected。
+func applyStreamDoneWriteError(result *ProxyResult, responseCompleted bool, err error) error {
+	if err == nil || result == nil {
+		return err
+	}
+	if responseCompleted {
+		result.DiagnosticType = domains.DiagnosticClientClosedAfterCompletion
+		result.DiagnosticSummary = proxyErrorSummary(err)
+		return nil
+	}
+	result.ErrorType = classifyDownstreamWriteError(err)
+	result.ErrorSummary = proxyErrorSummary(err)
+	return err
 }
 
 func streamEventErrorType(eventType string) string {

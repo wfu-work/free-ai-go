@@ -106,7 +106,8 @@ func (s PlatformKeyService) ReconcileUsageFromLogs() error {
 	var rows []usageRow
 	if err := global.NAV_DB.Model(&domains.RequestLog{}).
 		Select("platform_key_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used_tokens, COALESCE(SUM(cost_microusd), 0) AS cost_microusd").
-		Where("platform_key_id <> ?", "").Group("platform_key_id").Scan(&rows).Error; err != nil {
+		Where("platform_key_id <> ? AND path <> ?", "", "/v1/images/generations").
+		Group("platform_key_id").Scan(&rows).Error; err != nil {
 		return err
 	}
 	return global.NAV_DB.Transaction(func(tx *gorm.DB) error {

@@ -102,10 +102,13 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			return ProxyOutput{StatusCode: http.StatusForbidden}, modelErr
 		}
 	}
-	body = applyPlatformKeyRequestOverrides(body, platformKey, modelName)
+	body = applyPlatformKeyRequestOverrides(body, platformKey, modelName, endpoint)
 	logMeta = requestLogMeta(r, endpoint, body)
 	logMeta.Model = modelName
-	reservation, err := PlatformKeyServiceApp.ReserveTokens(platformKey, requestID, body)
+	reservation := PlatformKeyQuotaReservation{RequestID: requestID}
+	if endpoint != "/v1/images/generations" {
+		reservation, err = PlatformKeyServiceApp.ReserveTokens(platformKey, requestID, body)
+	}
 	if err != nil {
 		status := http.StatusTooManyRequests
 		errorType := domains.ErrorPlatformKeyLimited
@@ -198,6 +201,8 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	}
 	errorType := ""
 	errorSummary := ""
+	diagnosticType := ""
+	diagnosticSummary := ""
 	latencyMs := time.Since(start).Milliseconds()
 	preparationMs := int64(0)
 	dnsMs := int64(0)
@@ -214,6 +219,8 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	if lastResult != nil {
 		errorType = lastResult.ErrorType
 		errorSummary = lastResult.ErrorSummary
+		diagnosticType = lastResult.DiagnosticType
+		diagnosticSummary = lastResult.DiagnosticSummary
 		latencyMs = lastResult.LatencyMs
 		preparationMs = lastResult.PreparationMs
 		dnsMs = lastResult.DNSMs
@@ -235,10 +242,13 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		errorSummary = proxyErrorSummary(lastErr)
 	}
 	serviceTier := firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier)
-	cost := ModelPricingServiceApp.EstimateCost(
-		lastSelection.Model.VendorCode, lastSelection.Model.UpstreamModel, serviceTier,
-		inputTokens, cachedInputTokens, outputTokens,
-	)
+	cost := ModelCostEstimate{}
+	if endpoint != "/v1/images/generations" {
+		cost = ModelPricingServiceApp.EstimateCost(
+			lastSelection.Model.VendorCode, lastSelection.Model.UpstreamModel, serviceTier,
+			inputTokens, cachedInputTokens, outputTokens,
+		)
+	}
 	RequestLogServiceApp.Record(RequestLogInput{
 		RequestID:         requestID,
 		Method:            logMeta.Method,
@@ -255,6 +265,8 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		StatusCode:        statusCode,
 		ErrorType:         errorType,
 		ErrorSummary:      errorSummary,
+		DiagnosticType:    diagnosticType,
+		DiagnosticSummary: diagnosticSummary,
 		Switched:          len(switchReasons) > 0,
 		SwitchCount:       len(switchReasons),
 		SwitchReason:      strings.Join(switchReasons, ";"),
@@ -275,7 +287,11 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		PricingMatched:    cost.Matched,
 		PricingSource:     cost.SourceKind,
 	})
-	_ = PlatformKeyServiceApp.FinalizeTokens(platformKey.Guid, reservation, inputTokens+outputTokens, cost.CostMicrousd)
+	settledTokens := inputTokens + outputTokens
+	if endpoint == "/v1/images/generations" {
+		settledTokens = 0
+	}
+	_ = PlatformKeyServiceApp.FinalizeTokens(platformKey.Guid, reservation, settledTokens, cost.CostMicrousd)
 	settledReservation = true
 	return lastOutput, lastErr
 }
@@ -331,7 +347,7 @@ func PlatformKeyPrefixFromHeader(header string) string {
 	return token[:10]
 }
 
-func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, modelName string) []byte {
+func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, modelName, endpoint string) []byte {
 	if key.BoundModel == "" && key.ReasoningEffort == "" && key.ServiceTier == "" {
 		return body
 	}
@@ -341,6 +357,13 @@ func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, mode
 	}
 	if modelName != "" {
 		payload["model"] = modelName
+	}
+	if endpoint == "/v1/images/generations" {
+		updated, err := json.Marshal(payload)
+		if err != nil {
+			return body
+		}
+		return updated
 	}
 	if key.ReasoningEffort != "" {
 		reasoning, _ := payload["reasoning"].(map[string]any)

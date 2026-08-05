@@ -21,8 +21,9 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		routerLogger.POST("reorder", accountApi.Reorder)
 	}
 	{
-		// OAuth 文件、手动 Token 和授权码都属于敏感凭据，不经过可能记录请求体的 API 日志中间件。
+		// OAuth 文件、手动 Token、API Key 和授权码都属于敏感凭据，不经过可能记录请求体的 API 日志中间件。
 		router.POST("", accountApi.AddManual)
+		router.POST("api-key", accountApi.AddAPIKey)
 		router.POST("import", accountApi.Import)
 		router.POST("oauth/sessions", accountApi.StartOAuth)
 		router.GET("oauth/sessions/:id", accountApi.GetOAuth)

@@ -128,6 +128,17 @@ func (a ProxyApi) Responses(c *gin.Context) {
 	forwardProxy(c, "/v1/responses")
 }
 
+// ImageGenerations OpenAI Images API 兼容代理。
+// @Summary OpenAI 图片生成代理
+// @Description 使用独立 OpenAI Platform API Key 账号池生成图片
+// @Tags 代理模块
+// @Accept json
+// @Produce json
+// @Router /v1/images/generations [post]
+func (a ProxyApi) ImageGenerations(c *gin.Context) {
+	forwardProxy(c, "/v1/images/generations")
+}
+
 func forwardProxy(c *gin.Context, endpoint string) {
 	requestID := uuid.NewString()
 	c.Request.Header.Set("X-FreeAi-Request-ID", requestID)
@@ -167,6 +178,12 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	if err != nil {
 		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error())
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
+		return
+	}
+	if endpoint == "/v1/images/generations" && stream {
+		message := "streaming is not supported by /v1/images/generations"
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", message)
+		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", message))
 		return
 	}
 	if model != "" {

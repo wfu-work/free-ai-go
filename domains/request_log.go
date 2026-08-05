@@ -19,6 +19,8 @@ type RequestLog struct {
 	StatusCode        int     `json:"statusCode" gorm:"index;comment:状态码"`
 	ErrorType         string  `json:"errorType" gorm:"size:80;index;comment:错误类型"`
 	ErrorSummary      string  `json:"errorSummary" gorm:"size:512;comment:原始错误摘要"`
+	DiagnosticType    string  `json:"diagnosticType" gorm:"size:80;index;comment:非失败诊断类型"`
+	DiagnosticSummary string  `json:"diagnosticSummary" gorm:"size:512;comment:非失败诊断摘要"`
 	Switched          bool    `json:"switched" gorm:"index;comment:是否切换"`
 	SwitchCount       int     `json:"switchCount" gorm:"comment:切换次数"`
 	SwitchReason      string  `json:"switchReason" gorm:"comment:切换原因"`

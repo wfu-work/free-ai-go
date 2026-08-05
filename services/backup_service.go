@@ -21,6 +21,8 @@ var BackupServiceApp = BackupService{}
 type CoreBackupAccount struct {
 	domains.Account
 	EncryptedAccountFile string `json:"encryptedAccountFile,omitempty"`
+	EncryptedAPIKey      string `json:"encryptedApiKey,omitempty"`
+	CredentialHash       string `json:"credentialHash,omitempty"`
 }
 
 type CoreBackupPlatformKey struct {
@@ -92,6 +94,8 @@ func (s BackupService) ExportCore() (CoreBackupPayload, error) {
 		payload.Data.Accounts = append(payload.Data.Accounts, CoreBackupAccount{
 			Account:              account,
 			EncryptedAccountFile: account.EncryptedAccountFile,
+			EncryptedAPIKey:      account.EncryptedAPIKey,
+			CredentialHash:       account.CredentialHash,
 		})
 	}
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.AccountQuotas).Error; err != nil {
@@ -142,7 +146,15 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 			account := item.Account
 			account.Id = 0
 			account.EncryptedAccountFile = item.EncryptedAccountFile
-			if strings.TrimSpace(account.EncryptedAccountFile) == "" {
+			account.EncryptedAPIKey = item.EncryptedAPIKey
+			account.CredentialHash = item.CredentialHash
+			if account.CredentialType == domains.CredentialAPIKey || account.ProductCode == domains.ProductOpenAIImages {
+				if strings.TrimSpace(account.EncryptedAPIKey) == "" {
+					result.FailedAccounts++
+					appendImportError(&result.Errors, fmt.Sprintf("账号第%d条: 缺少加密 API Key", index+1))
+					continue
+				}
+			} else if strings.TrimSpace(account.EncryptedAccountFile) == "" {
 				result.FailedAccounts++
 				appendImportError(&result.Errors, fmt.Sprintf("账号第%d条: 缺少 OAuth 账号文件", index+1))
 				continue

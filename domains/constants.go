@@ -5,10 +5,13 @@ const (
 	VendorGoogle              = "google"
 	VendorAnthropic           = "anthropic"
 	ProductCodex              = "codex"
+	ProductOpenAIImages       = "openai_images"
 	ProductGemini             = "gemini"
 	ProductClaudeCode         = "claude_code"
 	CredentialOAuth           = "oauth"
+	CredentialAPIKey          = "api_key"
 	ProtocolOpenAIResponses   = "openai_responses"
+	ProtocolOpenAIImages      = "openai_images"
 	ProtocolAnthropicMessages = "anthropic_messages"
 
 	AccountStatusAvailable = "available"
@@ -48,4 +51,6 @@ const (
 	ErrorNoAvailableAccount = "no_available_account"
 	ErrorPlatformKeyInvalid = "platform_key_invalid"
 	ErrorPlatformKeyLimited = "platform_key_limited"
+
+	DiagnosticClientClosedAfterCompletion = "client_closed_after_completion"
 )
