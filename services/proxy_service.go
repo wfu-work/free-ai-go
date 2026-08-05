@@ -50,6 +50,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			ServiceTier:     logMeta.ServiceTier,
 			StatusCode:      status,
 			ErrorType:       errorType,
+			ErrorSummary:    proxyErrorSummary(err),
 			LatencyMs:       time.Since(start).Milliseconds(),
 		})
 		return ProxyOutput{StatusCode: status}, err
@@ -59,6 +60,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		logMeta.Model = modelName
 	}
 	if modelName == "" {
+		modelErr := errors.New("model is required")
 		RequestLogServiceApp.Record(RequestLogInput{
 			RequestID:       requestID,
 			PlatformKeyID:   platformKey.Guid,
@@ -71,12 +73,17 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
 			StatusCode:      http.StatusBadRequest,
 			ErrorType:       domains.ErrorModelNotSupported,
+			ErrorSummary:    proxyErrorSummary(modelErr),
 			LatencyMs:       time.Since(start).Milliseconds(),
 		})
-		return ProxyOutput{StatusCode: http.StatusBadRequest}, errors.New("model is required")
+		return ProxyOutput{StatusCode: http.StatusBadRequest}, modelErr
 	}
 	if !PlatformKeyServiceApp.ModelAllowed(platformKey, modelName) {
 		if model, findErr := ModelServiceApp.Find(modelName); findErr != nil || !PlatformKeyServiceApp.ModelExposureAllowed(platformKey, model) {
+			modelErr := errors.New(domains.ErrorModelNotSupported)
+			if findErr != nil {
+				modelErr = findErr
+			}
 			RequestLogServiceApp.Record(RequestLogInput{
 				RequestID:       requestID,
 				PlatformKeyID:   platformKey.Guid,
@@ -89,9 +96,10 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 				ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
 				StatusCode:      http.StatusForbidden,
 				ErrorType:       domains.ErrorModelNotSupported,
+				ErrorSummary:    proxyErrorSummary(modelErr),
 				LatencyMs:       time.Since(start).Milliseconds(),
 			})
-			return ProxyOutput{StatusCode: http.StatusForbidden}, errors.New(domains.ErrorModelNotSupported)
+			return ProxyOutput{StatusCode: http.StatusForbidden}, modelErr
 		}
 	}
 	body = applyPlatformKeyRequestOverrides(body, platformKey, modelName)
@@ -103,14 +111,14 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		errorType := domains.ErrorPlatformKeyLimited
 		if err.Error() != domains.ErrorPlatformKeyLimited {
 			status = http.StatusInternalServerError
-			errorType = "server_error"
+			errorType = domains.ErrorInternal
 		}
 		RequestLogServiceApp.Record(RequestLogInput{
 			RequestID: requestID, PlatformKeyID: platformKey.Guid, PlatformKey: platformKey.Name,
 			KeyPrefix: platformKey.KeyPrefix, Method: logMeta.Method, Path: logMeta.Path, Model: modelName,
 			ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
 			ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier), StatusCode: status,
-			ErrorType: errorType, LatencyMs: time.Since(start).Milliseconds(),
+			ErrorType: errorType, ErrorSummary: proxyErrorSummary(err), LatencyMs: time.Since(start).Milliseconds(),
 		})
 		return ProxyOutput{StatusCode: status}, err
 	}
@@ -134,6 +142,9 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		selection, err := RouterServiceApp.SelectForKey(modelName, excluded, platformKey)
 		if err != nil {
+			if lastSelection.Account.Guid != "" {
+				break
+			}
 			lastErr = err
 			status := http.StatusServiceUnavailable
 			if err.Error() == domains.ErrorModelNotSupported {
@@ -148,8 +159,17 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		lastResult = result
 		lastOutput = output
 		lastErr = err
-		if result != nil && result.ErrorType != "" {
-			QuotaServiceApp.ApplyError(selection.Account.Guid, result.ErrorType)
+		attemptErrorType := ""
+		if result != nil {
+			attemptErrorType = result.ErrorType
+		}
+		if attemptErrorType == "" && err != nil {
+			attemptErrorType = classifyError(err)
+		}
+		if accountFailureRelevant(attemptErrorType) {
+			QuotaServiceApp.ApplyErrorWithPolicy(selection.Account.Guid, attemptErrorType, AccountFailurePolicy{
+				PreserveLastAvailable: selection.AvailableAccountCount == 1,
+			})
 		}
 		if result != nil && len(result.Header) > 0 {
 			_, _ = QuotaServiceApp.SampleHeaders(selection.Account.Guid, "response_header", result.Header)
@@ -162,18 +182,22 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			break
 		}
 		reason := "upstream_error"
-		if result != nil && result.ErrorType != "" {
-			reason = result.ErrorType
+		if attemptErrorType != "" {
+			reason = attemptErrorType
 		} else if err != nil {
 			reason = err.Error()
 		}
 		switchReasons = append(switchReasons, selection.Account.Guid+":"+reason)
+	}
+	if noAvailableAccountBeforeUpstream(lastSelection, lastErr) {
+		return lastOutput, lastErr
 	}
 	statusCode := lastOutput.StatusCode
 	if statusCode == 0 {
 		statusCode = http.StatusBadGateway
 	}
 	errorType := ""
+	errorSummary := ""
 	latencyMs := time.Since(start).Milliseconds()
 	preparationMs := int64(0)
 	dnsMs := int64(0)
@@ -189,6 +213,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	outputTokens := int64(0)
 	if lastResult != nil {
 		errorType = lastResult.ErrorType
+		errorSummary = lastResult.ErrorSummary
 		latencyMs = lastResult.LatencyMs
 		preparationMs = lastResult.PreparationMs
 		dnsMs = lastResult.DNSMs
@@ -205,6 +230,9 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	}
 	if lastErr != nil && errorType == "" {
 		errorType = classifyError(lastErr)
+	}
+	if lastErr != nil && errorSummary == "" {
+		errorSummary = proxyErrorSummary(lastErr)
 	}
 	serviceTier := firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier)
 	cost := ModelPricingServiceApp.EstimateCost(
@@ -226,6 +254,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		ServiceTier:       serviceTier,
 		StatusCode:        statusCode,
 		ErrorType:         errorType,
+		ErrorSummary:      errorSummary,
 		Switched:          len(switchReasons) > 0,
 		SwitchCount:       len(switchReasons),
 		SwitchReason:      strings.Join(switchReasons, ";"),
@@ -249,6 +278,10 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	_ = PlatformKeyServiceApp.FinalizeTokens(platformKey.Guid, reservation, inputTokens+outputTokens, cost.CostMicrousd)
 	settledReservation = true
 	return lastOutput, lastErr
+}
+
+func noAvailableAccountBeforeUpstream(selection RouteSelection, err error) bool {
+	return selection.Account.Guid == "" && err != nil && err.Error() == domains.ErrorNoAvailableAccount
 }
 
 type requestLogMetadata struct {
@@ -374,7 +407,20 @@ func shouldRetry(result *ProxyResult, err error, stream bool) bool {
 		errorType = classifyError(err)
 	}
 	switch errorType {
-	case domains.ErrorAuthFailed, domains.ErrorRateLimited, domains.ErrorQuotaExhausted, domains.ErrorUpstreamTimeout, domains.ErrorUpstream5xx, domains.ErrorNetwork:
+	case domains.ErrorAuthFailed, domains.ErrorRateLimited, domains.ErrorQuotaExhausted,
+		domains.ErrorUpstreamTimeout, domains.ErrorUpstreamHTTP5xx, domains.ErrorUpstream5xx,
+		domains.ErrorUpstreamFailed, domains.ErrorStreamIncomplete, domains.ErrorNetwork:
+		return true
+	default:
+		return false
+	}
+}
+
+func accountFailureRelevant(errorType string) bool {
+	switch errorType {
+	case domains.ErrorAuthFailed, domains.ErrorRateLimited, domains.ErrorQuotaExhausted,
+		domains.ErrorUpstreamTimeout, domains.ErrorUpstreamHTTP5xx, domains.ErrorUpstream5xx,
+		domains.ErrorUpstreamFailed, domains.ErrorStreamIncomplete, domains.ErrorNetwork:
 		return true
 	default:
 		return false

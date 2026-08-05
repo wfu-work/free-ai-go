@@ -667,7 +667,8 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 	quotas, _ := QuotaServiceApp.ListByAccount(account.Guid)
 	return map[string]any{
 		"ok": ok, "model": model, "statusCode": result.StatusCode,
-		"errorType": result.ErrorType, "latencyMs": time.Since(started).Milliseconds(), "quotas": quotas,
+		"errorType": result.ErrorType, "errorSummary": result.ErrorSummary,
+		"latencyMs": time.Since(started).Milliseconds(), "quotas": quotas,
 	}, nil
 }
 
@@ -738,11 +739,34 @@ func (s AccountService) MarkUsed(guid string) error {
 	}).Error
 }
 
+// AccountFailurePolicy 控制路由请求失败后是否需要保留最后一个可用账号。
+type AccountFailurePolicy struct {
+	PreserveLastAvailable bool
+}
+
 func (s AccountService) MarkFailure(guid, errorType string) error {
+	return s.MarkFailureWithPolicy(guid, errorType, AccountFailurePolicy{})
+}
+
+// MarkFailureWithPolicy 记录账号失败。最后一个可用账号只豁免可恢复错误触发的自动冷却。
+func (s AccountService) MarkFailureWithPolicy(guid, errorType string, policy AccountFailurePolicy) error {
 	account, err := s.GetByGuid(guid)
 	if err != nil {
 		return err
 	}
+	status, cooldownUntil := accountFailureState(
+		account,
+		errorType,
+		policy,
+		time.Now(),
+		time.Duration(Config().CooldownSeconds)*time.Second,
+	)
+	return global.NAV_DB.Model(&account).Updates(map[string]any{
+		"failure_count": account.FailureCount + 1, "status": status, "cooldown_until": cooldownUntil,
+	}).Error
+}
+
+func accountFailureState(account domains.Account, errorType string, policy AccountFailurePolicy, now time.Time, cooldown time.Duration) (string, int64) {
 	status := account.Status
 	cooldownUntil := account.CooldownUntil
 	switch errorType {
@@ -750,18 +774,21 @@ func (s AccountService) MarkFailure(guid, errorType string) error {
 		status = domains.AccountStatusInvalid
 	case domains.ErrorRateLimited:
 		status = domains.AccountStatusLimited
-		cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
+		cooldownUntil = now.Add(cooldown).UnixMilli()
 	case domains.ErrorQuotaExhausted:
 		status = domains.AccountStatusExhausted
-	case domains.ErrorUpstream5xx, domains.ErrorNetwork, domains.ErrorUpstreamTimeout:
+	case domains.ErrorUpstreamHTTP5xx, domains.ErrorUpstream5xx, domains.ErrorUpstreamFailed,
+		domains.ErrorStreamIncomplete, domains.ErrorNetwork, domains.ErrorUpstreamTimeout:
 		if account.FailureCount+1 >= 3 {
-			status = domains.AccountStatusCooldown
-			cooldownUntil = time.Now().Add(time.Duration(Config().CooldownSeconds) * time.Second).UnixMilli()
+			if policy.PreserveLastAvailable {
+				cooldownUntil = 0
+			} else {
+				status = domains.AccountStatusCooldown
+				cooldownUntil = now.Add(cooldown).UnixMilli()
+			}
 		}
 	}
-	return global.NAV_DB.Model(&account).Updates(map[string]any{
-		"failure_count": account.FailureCount + 1, "status": status, "cooldown_until": cooldownUntil,
-	}).Error
+	return status, cooldownUntil
 }
 
 func (s AccountService) MarkExpiredSubscriptions() error {

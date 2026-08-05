@@ -47,13 +47,14 @@ func (a ProxyApi) Models(c *gin.Context) {
 			c.Header("Retry-After", "60")
 		}
 		services.RequestLogServiceApp.Record(services.RequestLogInput{
-			RequestID:  requestID,
-			Method:     c.Request.Method,
-			Path:       path,
-			KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
-			StatusCode: status,
-			ErrorType:  code,
-			LatencyMs:  time.Since(start).Milliseconds(),
+			RequestID:    requestID,
+			Method:       c.Request.Method,
+			Path:         path,
+			KeyPrefix:    services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
+			StatusCode:   status,
+			ErrorType:    code,
+			ErrorSummary: err.Error(),
+			LatencyMs:    time.Since(start).Milliseconds(),
 		})
 		c.JSON(status, openAIError(code, err.Error()))
 		return
@@ -68,7 +69,8 @@ func (a ProxyApi) Models(c *gin.Context) {
 			PlatformKey:   key.Name,
 			KeyPrefix:     key.KeyPrefix,
 			StatusCode:    http.StatusInternalServerError,
-			ErrorType:     "server_error",
+			ErrorType:     domains.ErrorInternal,
+			ErrorSummary:  err.Error(),
 			LatencyMs:     time.Since(start).Milliseconds(),
 		})
 		c.JSON(http.StatusInternalServerError, openAIError("server_error", err.Error()))
@@ -138,7 +140,7 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	queueTimeout := time.Duration(cfg.OverloadQueueTimeoutMs) * time.Millisecond
 	if !acquireProxyRequestSlot(c.Request.Context(), maxConcurrent, queueTimeout) {
 		c.Header("Retry-After", "1")
-		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded")
+		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded", "too many concurrent requests")
 		c.JSON(http.StatusTooManyRequests, openAIError("server_overloaded", "too many concurrent requests"))
 		return
 	}
@@ -153,17 +155,17 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			recordProxyRejection(c, requestID, endpoint, http.StatusRequestEntityTooLarge, "request_too_large")
+			recordProxyRejection(c, requestID, endpoint, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
 			c.JSON(http.StatusRequestEntityTooLarge, openAIError("request_too_large", "request body exceeds the configured limit"))
 			return
 		}
-		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error")
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error())
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
 		return
 	}
 	model, stream, err := readProxyMetadata(body)
 	if err != nil {
-		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error")
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error())
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
 		return
 	}
@@ -318,11 +320,11 @@ func releaseProxyRequestSlot() {
 	proxyRequestGate.Unlock()
 }
 
-func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType string) {
+func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType, errorSummary string) {
 	_ = services.RequestLogServiceApp.Record(services.RequestLogInput{
 		RequestID: requestID, Method: c.Request.Method, Path: endpoint,
 		KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
-		StatusCode: status, ErrorType: errorType,
+		StatusCode: status, ErrorType: errorType, ErrorSummary: errorSummary,
 	})
 }
 

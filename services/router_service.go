@@ -20,8 +20,9 @@ var RouterServiceApp = RouterService{}
 var routeStateLocks sync.Map
 
 type RouteSelection struct {
-	Model   RoutedModel     `json:"model"`
-	Account domains.Account `json:"account"`
+	Model                 RoutedModel     `json:"model"`
+	Account               domains.Account `json:"account"`
+	AvailableAccountCount int             `json:"availableAccountCount"`
 }
 
 func (s RouterService) Select(modelName string) (RouteSelection, error) {
@@ -84,7 +85,11 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 		return RouteSelection{}, errors.New(domains.ErrorNoAvailableAccount)
 	}
 	account := s.pickForKey(model, candidates, key)
-	return RouteSelection{Model: model, Account: account}, nil
+	return RouteSelection{
+		Model:                 model,
+		Account:               account,
+		AvailableAccountCount: len(candidates),
+	}, nil
 }
 
 func (s RouterService) pick(model RoutedModel, accounts []domains.Account) domains.Account {

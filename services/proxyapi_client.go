@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ type ProxyResult struct {
 	Body             []byte
 	Usage            ProxyUsage
 	ErrorType        string
+	ErrorSummary     string
 	PreparationMs    int64
 	DNSMs            int64
 	ConnectMs        int64
@@ -144,8 +146,12 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	result.Header.Set("Cache-Control", "no-cache")
 	result.Header.Set("Connection", "keep-alive")
 	flusher, _ := w.(http.Flusher)
+	terminalEventType := ""
 	for stream.Next() {
 		event := stream.Event()
+		if streamEventErrorType(event.Type) != "" {
+			terminalEventType = event.Type
+		}
 		elapsedMs := time.Since(start).Milliseconds()
 		if result.FirstEventMs == 0 {
 			result.FirstEventMs = elapsedMs
@@ -156,7 +162,8 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		result.StreamStarted = true
 		if err := writeStreamEvent(w, req, event); err != nil {
 			result.LatencyMs = time.Since(start).Milliseconds()
-			result.ErrorType = classifyError(err)
+			result.ErrorType = classifyDownstreamWriteError(err)
+			result.ErrorSummary = proxyErrorSummary(err)
 			return result, err
 		}
 		if flusher != nil {
@@ -169,6 +176,8 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	streamErr := stream.Err()
 	if req.Endpoint == "/v1/chat/completions" && result.StreamStarted && streamErr == nil {
 		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+			result.ErrorType = classifyDownstreamWriteError(err)
+			result.ErrorSummary = proxyErrorSummary(err)
 			return result, err
 		}
 		if flusher != nil {
@@ -177,7 +186,11 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	}
 	result.LatencyMs = time.Since(start).Milliseconds()
 	if streamErr != nil {
-		result.ErrorType = classifyError(streamErr)
+		result.ErrorType = streamEventErrorType(terminalEventType)
+		if result.ErrorType == "" {
+			result.ErrorType = classifyError(streamErr)
+		}
+		result.ErrorSummary = streamErrorSummary(terminalEventType, streamErr)
 		if !result.StreamStarted {
 			errResult, _ := apiErrorResult(streamErr, result.LatencyMs)
 			applyUpstreamTiming(errResult, preparationMs, trace)
@@ -303,7 +316,10 @@ func apiErrorResult(err error, latencyMs int64) (*ProxyResult, error) {
 	if marshalErr != nil {
 		return nil, marshalErr
 	}
-	return &ProxyResult{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, ErrorType: errorType, LatencyMs: latencyMs}, nil
+	return &ProxyResult{
+		StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body,
+		ErrorType: errorType, ErrorSummary: proxyErrorSummary(err), LatencyMs: latencyMs,
+	}, nil
 }
 
 func classifyError(err error) string {
@@ -318,7 +334,58 @@ func classifyError(err error) string {
 	if errors.As(err, &chatGPTErr) {
 		return classifyStatusError(chatGPTErr.StatusCode, chatGPTErr.Code+" "+chatGPTErr.Type+" "+chatGPTErr.Message)
 	}
-	text := strings.ToLower(err.Error())
+	if errors.Is(err, context.DeadlineExceeded) {
+		return domains.ErrorUpstreamTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return domains.ErrorClientDisconnected
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return domains.ErrorStreamIncomplete
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		if networkErr.Timeout() {
+			return domains.ErrorUpstreamTimeout
+		}
+		return domains.ErrorNetwork
+	}
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return domains.ErrorProtocol
+	}
+	return classifyUnstructuredError(err.Error())
+}
+
+func classifyDownstreamWriteError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return domains.ErrorClientDisconnected
+}
+
+func streamEventErrorType(eventType string) string {
+	switch eventType {
+	case openai.EventResponseFailed, "error":
+		return domains.ErrorUpstreamFailed
+	case "response.incomplete":
+		return domains.ErrorStreamIncomplete
+	default:
+		return ""
+	}
+}
+
+func streamErrorSummary(eventType string, err error) string {
+	summary := proxyErrorSummary(err)
+	if strings.TrimSpace(eventType) == "" {
+		return summary
+	}
+	return normalizeErrorSummary("event=" + strings.TrimSpace(eventType) + " " + summary)
+}
+
+func classifyUnstructuredError(message string) string {
+	text := strings.ToLower(message)
 	switch {
 	case strings.Contains(text, "no_available_account"):
 		return domains.ErrorNoAvailableAccount
@@ -326,12 +393,32 @@ func classifyError(err error) string {
 		return domains.ErrorModelNotSupported
 	case strings.Contains(text, "oauth") || strings.Contains(text, "refresh_token") || strings.Contains(text, "refresh token"):
 		return domains.ErrorAuthFailed
+	case strings.Contains(text, "quota") || strings.Contains(text, "insufficient"):
+		return domains.ErrorQuotaExhausted
 	case strings.Contains(text, "timeout") || strings.Contains(text, "deadline"):
 		return domains.ErrorUpstreamTimeout
-	case strings.Contains(text, "network") || strings.Contains(text, "connection"):
+	case strings.Contains(text, "without response.completed") || strings.Contains(text, "stream ended") ||
+		strings.Contains(text, "stream closed") || strings.Contains(text, "unexpected eof") ||
+		strings.Contains(text, "response incomplete") || strings.Contains(text, "response.incomplete"):
+		return domains.ErrorStreamIncomplete
+	case strings.Contains(text, "response.failed") || strings.Contains(text, "stream event error"):
+		return domains.ErrorUpstreamFailed
+	case strings.Contains(text, "context canceled") || strings.Contains(text, "context cancelled") ||
+		strings.Contains(text, "client disconnected"):
+		return domains.ErrorClientDisconnected
+	case strings.Contains(text, "invalid character") || strings.Contains(text, "cannot unmarshal") ||
+		strings.Contains(text, "invalid json") || strings.Contains(text, "malformed") ||
+		strings.Contains(text, "token too long"):
+		return domains.ErrorProtocol
+	case strings.Contains(text, "network") || strings.Contains(text, "connection") ||
+		strings.Contains(text, "broken pipe") || strings.Contains(text, "dial tcp") ||
+		strings.Contains(text, "no such host") || strings.Contains(text, "tls handshake"):
 		return domains.ErrorNetwork
+	case strings.Contains(text, "server_error") || strings.Contains(text, "internal server error") ||
+		strings.Contains(text, "bad gateway") || strings.Contains(text, "service unavailable"):
+		return domains.ErrorUpstreamHTTP5xx
 	default:
-		return domains.ErrorUpstream5xx
+		return domains.ErrorInternal
 	}
 }
 
@@ -347,8 +434,55 @@ func classifyStatusError(status int, message string) string {
 	case status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout:
 		return domains.ErrorUpstreamTimeout
 	case status >= 500:
-		return domains.ErrorUpstream5xx
+		return domains.ErrorUpstreamHTTP5xx
+	case status >= 400:
+		return domains.ErrorUpstreamHTTP4xx
 	default:
-		return domains.ErrorNetwork
+		return classifyUnstructuredError(message)
 	}
+}
+
+func proxyErrorSummary(err error) string {
+	if err == nil {
+		return ""
+	}
+	var openAIErr *openai.APIError
+	if errors.As(err, &openAIErr) {
+		return structuredErrorSummary("openai", openAIErr.StatusCode, openAIErr.Code, openAIErr.Type, openAIErr.Message, openAIErr.RequestID)
+	}
+	var chatGPTErr *chatgpt.APIError
+	if errors.As(err, &chatGPTErr) {
+		return structuredErrorSummary("chatgpt", chatGPTErr.StatusCode, chatGPTErr.Code, chatGPTErr.Type, chatGPTErr.Message, chatGPTErr.RequestID)
+	}
+	return normalizeErrorSummary(err.Error())
+}
+
+func structuredErrorSummary(source string, status int, code, errorType, message, requestID string) string {
+	parts := []string{source}
+	if status > 0 {
+		parts = append(parts, fmt.Sprintf("status=%d", status))
+	}
+	if strings.TrimSpace(code) != "" {
+		parts = append(parts, "code="+strings.TrimSpace(code))
+	}
+	if strings.TrimSpace(errorType) != "" {
+		parts = append(parts, "type="+strings.TrimSpace(errorType))
+	}
+	if strings.TrimSpace(message) != "" {
+		parts = append(parts, "message="+strings.TrimSpace(message))
+	}
+	if strings.TrimSpace(requestID) != "" {
+		parts = append(parts, "upstream_request_id="+strings.TrimSpace(requestID))
+	}
+	return normalizeErrorSummary(strings.Join(parts, " "))
+}
+
+func normalizeErrorSummary(value string) string {
+	const maxRunes = 512
+	summary := strings.Join(strings.Fields(value), " ")
+	runes := []rune(summary)
+	if len(runes) <= maxRunes {
+		return summary
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }

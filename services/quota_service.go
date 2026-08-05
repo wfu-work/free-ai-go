@@ -189,10 +189,14 @@ func quotaWindowName(prefix, kind string, window *chatgpt.RateLimitWindow) strin
 }
 
 func (s QuotaService) ApplyError(accountGuid, errorType string) {
-	if accountGuid == "" || errorType == "" {
+	s.ApplyErrorWithPolicy(accountGuid, errorType, AccountFailurePolicy{})
+}
+
+func (s QuotaService) ApplyErrorWithPolicy(accountGuid, errorType string, policy AccountFailurePolicy) {
+	if accountGuid == "" || !accountFailureRelevant(errorType) {
 		return
 	}
-	_ = AccountServiceApp.MarkFailure(accountGuid, errorType)
+	_ = AccountServiceApp.MarkFailureWithPolicy(accountGuid, errorType, policy)
 	if errorType != domains.ErrorRateLimited && errorType != domains.ErrorQuotaExhausted {
 		return
 	}

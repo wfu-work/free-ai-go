@@ -89,6 +89,7 @@ type RequestLogInput struct {
 	ServiceTier       string
 	StatusCode        int
 	ErrorType         string
+	ErrorSummary      string
 	Switched          bool
 	SwitchCount       int
 	SwitchReason      string
@@ -130,6 +131,7 @@ func (s RequestLogService) Record(input RequestLogInput) error {
 		ServiceTier:       input.ServiceTier,
 		StatusCode:        input.StatusCode,
 		ErrorType:         input.ErrorType,
+		ErrorSummary:      normalizeErrorSummary(input.ErrorSummary),
 		Switched:          input.Switched,
 		SwitchCount:       input.SwitchCount,
 		SwitchReason:      input.SwitchReason,
@@ -175,7 +177,7 @@ func (s RequestLogService) List(params map[string]string) (list interface{}, tot
 	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("request_id LIKE ? OR method LIKE ? OR path LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR error_type LIKE ? OR account_name LIKE ? OR platform_key LIKE ? OR key_prefix LIKE ?", like, like, like, like, like, like, like, like, like)
+		db = db.Where("request_id LIKE ? OR method LIKE ? OR path LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR error_type LIKE ? OR error_summary LIKE ? OR account_name LIKE ? OR platform_key LIKE ? OR key_prefix LIKE ?", like, like, like, like, like, like, like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err
