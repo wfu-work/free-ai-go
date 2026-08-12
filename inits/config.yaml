@@ -25,6 +25,8 @@ freeai:
   proxy-prefix: /v1
   request-timeout-seconds: 120
   stream-idle-timeout-seconds: 60
+  context-compaction-enabled: true
+  context-compaction-threshold-tokens: 100000
   max-retries: 1
   routing-strategy: weighted_round_robin
   quota-refresh-seconds: 180

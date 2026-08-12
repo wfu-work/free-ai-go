@@ -158,7 +158,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		}
 		lastSelection = selection
 		excluded[selection.Account.Guid] = true
-		result, output, err := s.callUpstream(r, w, endpoint, body, stream, selection)
+		result, output, err := s.callUpstreamAttempt(r, w, endpoint, body, stream, selection)
 		lastResult = result
 		lastOutput = output
 		lastErr = err
@@ -194,6 +194,16 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	}
 	if noAvailableAccountBeforeUpstream(lastSelection, lastErr) {
 		return lastOutput, lastErr
+	}
+	// Initial overload events stay hidden while another account can be tried.
+	// If routing is exhausted, replay the last real upstream error instead of
+	// completing the request as an empty HTTP 200 stream.
+	if stream && lastResult != nil && !lastResult.StreamStarted && len(lastResult.BufferedStreamBody) > 0 {
+		if replayErr := replayBufferedStreamError(w, lastResult); replayErr != nil {
+			lastErr = replayErr
+			lastResult.ErrorType = classifyDownstreamWriteError(replayErr)
+			lastResult.ErrorSummary = proxyErrorSummary(replayErr)
+		}
 	}
 	statusCode := lastOutput.StatusCode
 	if statusCode == 0 {
@@ -296,6 +306,27 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	return lastOutput, lastErr
 }
 
+func (s ProxyService) callUpstreamAttempt(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, selection RouteSelection) (result *ProxyResult, output ProxyOutput, err error) {
+	defer func() {
+		RouterServiceApp.ObserveAttempt(selection, result, err)
+	}()
+	return s.callUpstream(r, w, endpoint, body, stream, selection)
+}
+
+func replayBufferedStreamError(w io.Writer, result *ProxyResult) error {
+	if result == nil || result.StreamStarted || len(result.BufferedStreamBody) == 0 {
+		return nil
+	}
+	if _, err := w.Write(result.BufferedStreamBody); err != nil {
+		return err
+	}
+	result.StreamStarted = true
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
+}
+
 func noAvailableAccountBeforeUpstream(selection RouteSelection, err error) bool {
 	return selection.Account.Guid == "" && err != nil && err.Error() == domains.ErrorNoAvailableAccount
 }
@@ -384,20 +415,27 @@ func applyPlatformKeyRequestOverrides(body []byte, key domains.PlatformKey, mode
 }
 
 func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, selection RouteSelection) (*ProxyResult, ProxyOutput, error) {
+	cfg := Config()
+	timeout := effectiveUpstreamTimeout(selection.Model.TimeoutSec, cfg.RequestTimeout())
 	req := ProxyRequest{
-		Endpoint: endpoint,
-		Model:    selection.Model.UpstreamModel,
-		Body:     body,
-		Stream:   stream,
+		Endpoint:             endpoint,
+		Model:                selection.Model.UpstreamModel,
+		Body:                 body,
+		Stream:               stream,
+		FirstResponseTimeout: timeout,
+		StreamIdleTimeout:    cfg.StreamIdleTimeout(),
+		ContextCompaction:    cfg.ContextCompactionEnabled,
+		CompactionThreshold:  cfg.ContextCompactionThreshold,
 	}
-	timeout := effectiveUpstreamTimeout(selection.Model.TimeoutSec, Config().RequestTimeout())
-	ctx, cancel := contextWithOptionalTimeout(r.Context(), timeout)
-	defer cancel()
 	var result *ProxyResult
 	var err error
 	if stream {
-		result, err = ProxyAPIClientApp.Stream(ctx, selection.Account, req, w)
+		// 流式请求不再携带固定总截止时间。ProxyAPIClient 会在首个 SSE
+		// 前使用 FirstResponseTimeout，开始输出后改用可重置的空闲超时。
+		result, err = ProxyAPIClientApp.Stream(r.Context(), selection.Account, req, w)
 	} else {
+		ctx, cancel := contextWithOptionalTimeout(r.Context(), timeout)
+		defer cancel()
 		result, err = ProxyAPIClientApp.Do(ctx, selection.Account, req)
 	}
 	if result == nil {
@@ -406,8 +444,8 @@ func (s ProxyService) callUpstream(r *http.Request, w io.Writer, endpoint string
 	return result, ProxyOutput{StatusCode: result.StatusCode, Header: result.Header, Body: result.Body}, err
 }
 
-// effectiveUpstreamTimeout 计算单次代理请求的总超时。
-// 网关总超时为 0 时全局关闭；模型为 0 时继承网关设置。
+// effectiveUpstreamTimeout 计算非流式请求的总超时，或流式请求的首响应超时。
+// 网关超时为 0 时全局关闭；模型为 0 时继承网关设置。
 func effectiveUpstreamTimeout(modelTimeoutSec int, gatewayTimeout time.Duration) time.Duration {
 	if gatewayTimeout <= 0 {
 		return 0

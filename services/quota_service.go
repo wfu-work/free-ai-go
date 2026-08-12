@@ -143,6 +143,51 @@ func (s QuotaService) SyncRateLimit(accountGuid, prefix, source string, limit *c
 	return out, nil
 }
 
+// ReconcileSnapshot 在一次完整额度快照同步成功后，移除该来源已经不再返回的旧窗口，
+// 并依据窗口的实际数值重算状态。历史版本会在一次额度错误发生时把账号的所有窗口
+// 都标记为 exhausted；这里同时负责清除这类与最新额度数据不一致的遗留标记。
+func (s QuotaService) ReconcileSnapshot(accountGuid, source string, activeWindowTypes []string) error {
+	accountGuid = strings.TrimSpace(accountGuid)
+	source = strings.TrimSpace(source)
+	if accountGuid == "" || source == "" {
+		return errors.New("accountGuid and source are required")
+	}
+
+	active := make([]string, 0, len(activeWindowTypes))
+	seen := make(map[string]struct{}, len(activeWindowTypes))
+	for _, windowType := range activeWindowTypes {
+		windowType = strings.TrimSpace(windowType)
+		if windowType == "" {
+			continue
+		}
+		if _, ok := seen[windowType]; ok {
+			continue
+		}
+		seen[windowType] = struct{}{}
+		active = append(active, windowType)
+	}
+	if len(active) == 0 {
+		return errors.New("quota snapshot contains no active windows")
+	}
+
+	return global.NAV_DB.Transaction(func(tx *gorm.DB) error {
+		stale := tx.Where("account_guid = ? AND source = ?", accountGuid, source)
+		stale = stale.Where("window_type NOT IN ?", active)
+		if err := stale.Delete(&domains.AccountQuota{}).Error; err != nil {
+			return err
+		}
+
+		status := gorm.Expr(
+			"CASE WHEN limit_reached = ? OR allowed = ? OR used_percent >= ? THEN ? ELSE ? END",
+			true, false, QuotaExhaustedPercentThreshold,
+			domains.QuotaStatusExhausted, domains.QuotaStatusAvailable,
+		)
+		return tx.Model(&domains.AccountQuota{}).
+			Where("account_guid = ?", accountGuid).
+			Update("status", status).Error
+	})
+}
+
 func (s QuotaService) SampleHeaders(accountGuid, source string, header map[string][]string) ([]domains.AccountQuota, error) {
 	snapshot, ok := chatgpt.ParseRateLimitHeaders(header)
 	if !ok {
@@ -197,14 +242,6 @@ func (s QuotaService) ApplyErrorWithPolicy(accountGuid, errorType string, policy
 		return
 	}
 	_ = AccountServiceApp.MarkFailureWithPolicy(accountGuid, errorType, policy)
-	if errorType != domains.ErrorRateLimited && errorType != domains.ErrorQuotaExhausted {
-		return
-	}
-	status := domains.QuotaStatusLimited
-	if errorType == domains.ErrorQuotaExhausted {
-		status = domains.QuotaStatusExhausted
-	}
-	_ = global.NAV_DB.Model(&domains.AccountQuota{}).Where("account_guid = ?", accountGuid).Update("status", status).Error
 }
 
 func (s QuotaService) HasBlockingQuota(accountGuid string) (bool, error) {

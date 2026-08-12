@@ -265,6 +265,31 @@ func (a AccountApi) RefreshUsage(c *gin.Context) {
 	response.Ok(result, c)
 }
 
+// ResetCredits 查询官方账号的额度重置券。
+func (a AccountApi) ResetCredits(c *gin.Context) {
+	result, err := services.AccountResetCreditServiceApp.List(c.Request.Context(), c.Param("guid"))
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
+// ConsumeResetCredit 幂等消耗一张官方额度重置券，并重新同步账号额度。
+func (a AccountApi) ConsumeResetCredit(c *gin.Context) {
+	var input services.ConsumeAccountResetCreditInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := services.AccountResetCreditServiceApp.Consume(c.Request.Context(), c.Param("guid"), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
+
 // Probe 主动发起一个极小的 Codex Responses 请求并采样额度响应头。
 func (a AccountApi) Probe(c *gin.Context) {
 	var input services.AccountTestInput

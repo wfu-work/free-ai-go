@@ -23,6 +23,7 @@ type RouteSelection struct {
 	Model                 RoutedModel     `json:"model"`
 	Account               domains.Account `json:"account"`
 	AvailableAccountCount int             `json:"availableAccountCount"`
+	AdaptiveAcquired      bool            `json:"-"`
 }
 
 func (s RouterService) Select(modelName string) (RouteSelection, error) {
@@ -84,11 +85,13 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 	if len(candidates) == 0 {
 		return RouteSelection{}, errors.New(domains.ErrorNoAvailableAccount)
 	}
-	account := s.pickForKey(model, candidates, key)
+	strategy := Config().RoutingStrategy
+	account := s.pickByStrategy(model, candidates, strategy)
 	return RouteSelection{
 		Model:                 model,
 		Account:               account,
 		AvailableAccountCount: len(candidates),
+		AdaptiveAcquired:      strategy == "weighted_round_robin",
 	}, nil
 }
 
@@ -97,16 +100,12 @@ func (s RouterService) pick(model RoutedModel, accounts []domains.Account) domai
 	return s.pickByStrategy(model, accounts, strategy)
 }
 
-func (s RouterService) pickForKey(model RoutedModel, accounts []domains.Account, key domains.PlatformKey) domains.Account {
-	return s.pickByStrategy(model, accounts, Config().RoutingStrategy)
-}
-
 func (s RouterService) pickByStrategy(model RoutedModel, accounts []domains.Account, strategy string) domains.Account {
 	switch strategy {
 	case "round_robin":
 		return s.pickRoundRobin(model, accounts, false)
 	case "weighted_round_robin":
-		return s.pickRoundRobin(model, accounts, true)
+		return s.pickAdaptiveWeighted(model, accounts)
 	case "least_recently_used":
 		sort.SliceStable(accounts, func(i, j int) bool {
 			return accounts[i].LastUsedAt < accounts[j].LastUsedAt
@@ -122,6 +121,34 @@ func (s RouterService) pickByStrategy(model RoutedModel, accounts []domains.Acco
 	default:
 		return accounts[0]
 	}
+}
+
+func (s RouterService) pickAdaptiveWeighted(model RoutedModel, accounts []domains.Account) domains.Account {
+	routeKey := fmt.Sprintf("%s:%s:adaptive", model.AccountGroup, model.PublicModel)
+	state := domains.RouteState{}
+	cursor, redisCursor := s.redisRouteCursor(routeKey)
+	if !redisCursor {
+		lockValue, _ := routeStateLocks.LoadOrStore(routeKey, &sync.Mutex{})
+		lock := lockValue.(*sync.Mutex)
+		lock.Lock()
+		defer lock.Unlock()
+		state = s.routeState(routeKey)
+		cursor = state.Cursor
+	}
+	selected := adaptiveRouteMetrics.pickAndAcquire(accounts, cursor, time.Now())
+	if selected.Guid == "" {
+		selected = accounts[0]
+	}
+	if !redisCursor {
+		s.saveRouteState(state, selected.Guid, cursor+1)
+	}
+	return selected
+}
+
+// ObserveAttempt releases the account's in-flight slot and feeds the latest
+// first-response and overload outcome back into adaptive routing.
+func (s RouterService) ObserveAttempt(selection RouteSelection, result *ProxyResult, err error) {
+	adaptiveRouteMetrics.observe(selection.Account.Guid, selection.AdaptiveAcquired, result, err, time.Now())
 }
 
 func (s RouterService) pickRoundRobin(model RoutedModel, accounts []domains.Account, weighted bool) domains.Account {

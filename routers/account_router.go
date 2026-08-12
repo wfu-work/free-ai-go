@@ -16,6 +16,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		routerLogger.POST(":guid/enable", accountApi.Enable)
 		routerLogger.POST(":guid/disable", accountApi.Disable)
 		routerLogger.POST(":guid/refresh-usage", accountApi.RefreshUsage)
+		routerLogger.POST(":guid/reset-credits/consume", accountApi.ConsumeResetCredit)
 		routerLogger.POST(":guid/probe", accountApi.Probe)
 		routerLogger.POST("fetch-models", accountApi.FetchModels)
 		routerLogger.POST("reorder", accountApi.Reorder)
@@ -32,6 +33,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		router.GET("list", accountApi.List)
 		router.GET("list/all", accountApi.ListAll)
 		router.GET(":guid", accountApi.GetByGuid)
+		router.GET(":guid/reset-credits", accountApi.ResetCredits)
 		router.GET(":guid/export", accountApi.Export)
 	}
 }

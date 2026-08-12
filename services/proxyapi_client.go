@@ -19,10 +19,14 @@ import (
 )
 
 type ProxyRequest struct {
-	Endpoint string
-	Model    string
-	Body     []byte
-	Stream   bool
+	Endpoint             string
+	Model                string
+	Body                 []byte
+	Stream               bool
+	FirstResponseTimeout time.Duration
+	StreamIdleTimeout    time.Duration
+	ContextCompaction    bool
+	CompactionThreshold  int64
 }
 
 type ProxyUsage struct {
@@ -32,25 +36,26 @@ type ProxyUsage struct {
 }
 
 type ProxyResult struct {
-	StatusCode        int
-	Header            http.Header
-	Body              []byte
-	Usage             ProxyUsage
-	ErrorType         string
-	ErrorSummary      string
-	DiagnosticType    string
-	DiagnosticSummary string
-	PreparationMs     int64
-	DNSMs             int64
-	ConnectMs         int64
-	TLSHandshakeMs    int64
-	UpstreamHeaderMs  int64
-	FirstEventMs      int64
-	FirstTokenMs      int64
-	LatencyMs         int64
-	ConnectionReused  bool
-	ConnectionTraced  bool
-	StreamStarted     bool
+	StatusCode         int
+	Header             http.Header
+	Body               []byte
+	BufferedStreamBody []byte
+	Usage              ProxyUsage
+	ErrorType          string
+	ErrorSummary       string
+	DiagnosticType     string
+	DiagnosticSummary  string
+	PreparationMs      int64
+	DNSMs              int64
+	ConnectMs          int64
+	TLSHandshakeMs     int64
+	UpstreamHeaderMs   int64
+	FirstEventMs       int64
+	FirstTokenMs       int64
+	LatencyMs          int64
+	ConnectionReused   bool
+	ConnectionTraced   bool
+	StreamStarted      bool
 }
 
 type ProxyAPIClient interface {
@@ -112,6 +117,7 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 		StatusCode: result.StatusCode, Header: result.Header.Clone(), Body: body,
 		Usage: usageFromResponse(result.Response), FirstTokenMs: latency, LatencyMs: latency,
 	}
+	applyContextCompactionDiagnostic(proxyResult, responseContainsCompaction(result.Response), req.CompactionThreshold)
 	applyUpstreamTiming(proxyResult, preparationMs, trace)
 	return proxyResult, nil
 }
@@ -121,13 +127,19 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		return unsupportedEndpointResult(req.Endpoint, req.Model)
 	}
 	start := time.Now()
+	streamCtx, streamTimeouts := newStreamTimeoutContext(ctx, req.FirstResponseTimeout)
+	defer func() {
+		streamTimeouts.stop()
+		streamTimeouts.cancel(context.Canceled)
+	}()
 	responseReq, err := convertProxyRequest(req)
 	if err != nil {
 		return nil, err
 	}
 	responseReq.Model = req.Model
-	file, err := AccountServiceApp.ActiveAccountFile(ctx, account, false)
+	file, err := AccountServiceApp.ActiveAccountFile(streamCtx, account, false)
 	if err != nil {
+		err = streamContextError(streamCtx, ctx, err)
 		return apiErrorResult(err, time.Since(start).Milliseconds())
 	}
 	client, err := chatGPTClient(file)
@@ -136,16 +148,17 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	}
 	preparationMs := time.Since(start).Milliseconds()
 	trace := newUpstreamRequestTrace()
-	upstream, err := client.Codex.Stream(trace.context(ctx), accountRouteID(account, file), responseReq)
+	upstream, err := client.Codex.Stream(trace.context(streamCtx), accountRouteID(account, file), responseReq)
 	if isChatGPTUnauthorized(err) {
-		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
+		if file, refreshErr := AccountServiceApp.ActiveAccountFile(streamCtx, account, true); refreshErr == nil {
 			client, _ = chatGPTClient(file)
 			preparationMs = time.Since(start).Milliseconds()
 			trace = newUpstreamRequestTrace()
-			upstream, err = client.Codex.Stream(trace.context(ctx), accountRouteID(account, file), responseReq)
+			upstream, err = client.Codex.Stream(trace.context(streamCtx), accountRouteID(account, file), responseReq)
 		}
 	}
 	if err != nil {
+		err = streamContextError(streamCtx, ctx, err)
 		proxyResult, proxyErr := apiErrorResult(err, time.Since(start).Milliseconds())
 		applyUpstreamTiming(proxyResult, preparationMs, trace)
 		return proxyResult, proxyErr
@@ -165,6 +178,10 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	responseCompleted := false
 	for stream.Next() {
 		event := stream.Event()
+		// 首个 SSE 到达后，固定的首响应时限即告结束；此后只在连续
+		// 没有新事件超过空闲时限时取消上游读取。
+		streamTimeouts.noteEvent(req.StreamIdleTimeout)
+		applyContextCompactionDiagnostic(result, streamEventContainsCompaction(event), req.CompactionThreshold)
 		if streamEventErrorType(event.Type) != "" {
 			terminalEventType = event.Type
 		}
@@ -174,6 +191,15 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		}
 		if result.FirstTokenMs == 0 && isContentStreamEvent(event) {
 			result.FirstTokenMs = elapsedMs
+		}
+		// 上游可能用 HTTP 200 建立 SSE，随后把过载作为第一个 error 事件。
+		// 此时下游还未看到任何字节，可以安全吞掉该事件并交给路由层切换账号。
+		if !result.StreamStarted && isRetryableInitialOverloadEvent(event) {
+			result.LatencyMs = elapsedMs
+			result.ErrorType = domains.ErrorUpstreamFailed
+			result.ErrorSummary = initialStreamErrorSummary(event)
+			result.BufferedStreamBody = initialStreamErrorBody(req, event)
+			return result, nil
 		}
 		result.StreamStarted = true
 		if err := writeStreamEvent(w, req, event); err != nil {
@@ -190,7 +216,11 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 			responseCompleted = true
 		}
 	}
+	streamTimeouts.stop()
 	streamErr := stream.Err()
+	if streamErr != nil || streamCtx.Err() != nil {
+		streamErr = streamContextError(streamCtx, ctx, streamErr)
+	}
 	if req.Endpoint == "/v1/chat/completions" && result.StreamStarted && streamErr == nil {
 		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 			if writeErr := applyStreamDoneWriteError(result, responseCompleted, err); writeErr != nil {
@@ -241,14 +271,62 @@ func isContentStreamEvent(event openai.StreamEvent) bool {
 }
 
 func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
+	var responseReq openai.ResponseRequest
+	var err error
 	switch req.Endpoint {
 	case "/v1/chat/completions":
-		return chatcompletions.Decode(req.Body)
+		responseReq, err = chatcompletions.Decode(req.Body)
 	case "/v1/responses":
-		return responsescodec.Decode(req.Body)
+		responseReq, err = responsescodec.Decode(req.Body)
 	default:
 		return openai.ResponseRequest{}, fmt.Errorf("Codex account pool does not support endpoint %s", req.Endpoint)
 	}
+	if err != nil {
+		return openai.ResponseRequest{}, err
+	}
+	// 服务端压缩会在响应中返回必须原样携带到下一轮的加密 compaction
+	// item，因此只对能够透传 Responses 输入/输出项的端点启用。
+	if req.Endpoint == "/v1/responses" && req.ContextCompaction {
+		if responseReq.Extra == nil {
+			responseReq.Extra = map[string]any{}
+		}
+		threshold := normalizeContextCompactionThreshold(req.CompactionThreshold)
+		responseReq.Extra["context_management"] = []map[string]any{{
+			"type":              "compaction",
+			"compact_threshold": threshold,
+		}}
+	}
+	return responseReq, nil
+}
+
+func responseContainsCompaction(response *openai.Response) bool {
+	if response == nil {
+		return false
+	}
+	for _, item := range response.Output {
+		if item.Type == "compaction" {
+			return true
+		}
+	}
+	return false
+}
+
+func streamEventContainsCompaction(event openai.StreamEvent) bool {
+	if strings.Contains(strings.ToLower(event.Type), "compaction") {
+		return true
+	}
+	if added, ok := event.OutputItemAdded(); ok {
+		return added.Item.Type == "compaction"
+	}
+	return false
+}
+
+func applyContextCompactionDiagnostic(result *ProxyResult, compacted bool, threshold int64) {
+	if result == nil || !compacted {
+		return
+	}
+	result.DiagnosticType = domains.DiagnosticContextCompacted
+	result.DiagnosticSummary = fmt.Sprintf("server-side context compaction triggered at %d input tokens", threshold)
 }
 
 func replaceProxyModel(body []byte, model string) []byte {
@@ -436,6 +514,82 @@ func streamEventErrorType(eventType string) string {
 	default:
 		return ""
 	}
+}
+
+func isRetryableInitialOverloadEvent(event openai.StreamEvent) bool {
+	if streamEventErrorType(event.Type) == "" {
+		return false
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Error struct {
+				Code    string `json:"code"`
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(event.Data, &payload); err != nil {
+		return false
+	}
+	// Include the raw payload because response.failed may nest the error under
+	// response.error instead of exposing it at the top level.
+	text := strings.ToLower(strings.Join([]string{
+		payload.Error.Code, payload.Error.Type, payload.Error.Message,
+		payload.Response.Error.Code, payload.Response.Error.Type, payload.Response.Error.Message,
+		payload.Code, payload.Message,
+		string(event.Data),
+	}, " "))
+	return strings.Contains(text, "server_is_overloaded") ||
+		strings.Contains(text, "service_unavailable_error") ||
+		strings.Contains(text, "servers are currently overloaded")
+}
+
+func initialStreamErrorSummary(event openai.StreamEvent) string {
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Error struct {
+				Code    string `json:"code"`
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(event.Data, &payload)
+	parts := []string{"event=" + strings.TrimSpace(event.Type), "openai"}
+	if code := firstNonEmpty(payload.Error.Code, payload.Response.Error.Code, payload.Code); code != "" {
+		parts = append(parts, "code="+code)
+	}
+	if errorType := firstNonEmpty(payload.Error.Type, payload.Response.Error.Type); errorType != "" {
+		parts = append(parts, "type="+errorType)
+	}
+	if message := firstNonEmpty(payload.Error.Message, payload.Response.Error.Message, payload.Message); message != "" {
+		parts = append(parts, "message="+message)
+	}
+	return normalizeErrorSummary(strings.Join(parts, " "))
+}
+
+// initialStreamErrorBody preserves the upstream error while another account
+// is attempted. It is replayed only when routing exhausts all retry options.
+func initialStreamErrorBody(req ProxyRequest, event openai.StreamEvent) []byte {
+	if req.Endpoint == "/v1/chat/completions" {
+		return []byte(fmt.Sprintf("data: %s\n\n", event.Data))
+	}
+	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Type, event.Data))
 }
 
 func streamErrorSummary(eventType string, err error) string {

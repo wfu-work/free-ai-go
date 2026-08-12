@@ -31,6 +31,8 @@ type GatewayConfig struct {
 	OverloadQueueTimeoutMs     int64
 	QuotaDefaultReserveTokens  int64
 	QuotaReservationTTLSeconds int64
+	ContextCompactionEnabled   bool
+	ContextCompactionThreshold int64
 }
 
 type GatewayProxyConfigInput struct {
@@ -47,6 +49,8 @@ type GatewayProxyConfigInput struct {
 	MaxRequestBodyMiB           *int64 `json:"maxRequestBodyMiB,omitempty"`
 	MaxRetries                  *int   `json:"maxRetries,omitempty"`
 	OverloadQueueTimeoutMs      *int64 `json:"overloadQueueTimeoutMs,omitempty"`
+	ContextCompactionEnabled    bool   `json:"contextCompactionEnabled"`
+	ContextCompactionThreshold  int64  `json:"contextCompactionThresholdTokens"`
 }
 
 type gatewayCapacityConfig struct {
@@ -89,6 +93,14 @@ const (
 	systemConfigGatewaySSEKeepAliveMs      = "gateway.sse-keep-alive-ms"
 	systemConfigGatewayUpstreamTimeoutMs   = "gateway.upstream-timeout-ms"
 	systemConfigGatewayStreamIdleTimeoutMs = "gateway.upstream-stream-idle-timeout-ms"
+	systemConfigContextCompactionEnabled   = "gateway.context-compaction-enabled"
+	systemConfigContextCompactionThreshold = "gateway.context-compaction-threshold-tokens"
+)
+
+const (
+	defaultContextCompactionThreshold = int64(100000)
+	minContextCompactionThreshold     = int64(80000)
+	maxContextCompactionThreshold     = int64(120000)
 )
 
 func Config() GatewayConfig {
@@ -97,6 +109,10 @@ func Config() GatewayConfig {
 		m = global.NAV_VIPER.GetStringMap("freeai")
 	} else if global.NAV_CONFIG.Extras != nil {
 		m = cast.ToStringMap(global.NAV_CONFIG.Extras["freeai"])
+	}
+	contextCompactionEnabled := true
+	if value, ok := m["context-compaction-enabled"]; ok {
+		contextCompactionEnabled = cast.ToBool(value)
 	}
 	cfg := GatewayConfig{
 		ProxyPrefix:                stringDefault(cast.ToString(m["proxy-prefix"]), "/v1"),
@@ -116,8 +132,11 @@ func Config() GatewayConfig {
 		OverloadQueueTimeoutMs:     cast.ToInt64(m["overload-queue-timeout-ms"]),
 		QuotaDefaultReserveTokens:  int64Default(cast.ToInt64(m["quota-default-reserve-tokens"]), 8192),
 		QuotaReservationTTLSeconds: int64Default(cast.ToInt64(m["quota-reservation-ttl-seconds"]), 1800),
+		ContextCompactionEnabled:   contextCompactionEnabled,
+		ContextCompactionThreshold: int64Default(cast.ToInt64(m["context-compaction-threshold-tokens"]), defaultContextCompactionThreshold),
 	}
 	applySystemConfigOverrides(&cfg)
+	cfg.ContextCompactionThreshold = normalizeContextCompactionThreshold(cfg.ContextCompactionThreshold)
 	return cfg
 }
 
@@ -144,10 +163,16 @@ func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.OverloadQueueTimeoutMs = SystemConfigServiceApp.GetInt64(systemConfigOverloadQueueTimeoutMs, cfg.OverloadQueueTimeoutMs)
 	cfg.QuotaDefaultReserveTokens = SystemConfigServiceApp.GetInt64(systemConfigQuotaDefaultReserveTokens, cfg.QuotaDefaultReserveTokens)
 	cfg.QuotaReservationTTLSeconds = SystemConfigServiceApp.GetInt64(systemConfigQuotaReservationTTLSeconds, cfg.QuotaReservationTTLSeconds)
+	cfg.ContextCompactionEnabled = SystemConfigServiceApp.GetBool(systemConfigContextCompactionEnabled, cfg.ContextCompactionEnabled)
+	cfg.ContextCompactionThreshold = SystemConfigServiceApp.GetInt64(systemConfigContextCompactionThreshold, cfg.ContextCompactionThreshold)
 }
 
 func (c GatewayConfig) RequestTimeout() time.Duration {
 	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+func (c GatewayConfig) StreamIdleTimeout() time.Duration {
+	return time.Duration(c.StreamIdleTimeoutSeconds) * time.Second
 }
 
 // contextWithOptionalTimeout 创建可取消的请求上下文；timeout <= 0 表示不设置截止时间。
@@ -223,13 +248,21 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 		MaxRequestBodyMiB:           int64Ptr(maxRequestBodyMiB),
 		MaxRetries:                  intPtr(cfg.MaxRetries),
 		OverloadQueueTimeoutMs:      int64Ptr(cfg.OverloadQueueTimeoutMs),
+		ContextCompactionEnabled:    cfg.ContextCompactionEnabled,
+		ContextCompactionThreshold:  cfg.ContextCompactionThreshold,
 	}
 }
 
 func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfigInput, error) {
 	input.UpstreamProxyURL = strings.TrimSpace(input.UpstreamProxyURL)
+	if input.ContextCompactionThreshold == 0 {
+		input.ContextCompactionThreshold = defaultContextCompactionThreshold
+	}
 	if input.UpstreamTimeoutMs < 0 {
 		return GatewayProxyConfigInput{}, errors.New("upstreamTimeoutMs must be greater than or equal to 0")
+	}
+	if input.ContextCompactionThreshold < minContextCompactionThreshold || input.ContextCompactionThreshold > maxContextCompactionThreshold {
+		return GatewayProxyConfigInput{}, errors.New("contextCompactionThresholdTokens must be between 80000 and 120000")
 	}
 	capacity, err := resolveGatewayCapacity(input, Config())
 	if err != nil {
@@ -249,6 +282,12 @@ func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfig
 		return GatewayProxyConfigInput{}, err
 	}
 	if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, systemConfigUpstreamProxyURL, input.UpstreamProxyURL, "上游代理地址"); err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
+	if err := SystemConfigServiceApp.SetBool(systemConfigGroupGateway, systemConfigContextCompactionEnabled, input.ContextCompactionEnabled, "自动上下文压缩开关"); err != nil {
+		return GatewayProxyConfigInput{}, err
+	}
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigContextCompactionThreshold, input.ContextCompactionThreshold, "自动上下文压缩 Token 阈值"); err != nil {
 		return GatewayProxyConfigInput{}, err
 	}
 	if err := updateGatewayRuntimeConfig(input, capacity); err != nil {
@@ -277,11 +316,11 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayC
 	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewaySSEKeepAliveMs, int64Default(input.SSEKeepAliveMs, 15000), "SSE 保活间隔"); err != nil {
 		return err
 	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游总超时"); err != nil {
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游首响应超时"); err != nil {
 		return err
 	}
 	requestTimeoutSeconds := timeoutMillisecondsToSeconds(input.UpstreamTimeoutMs)
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigRequestTimeoutSeconds, requestTimeoutSeconds, "上游请求超时秒数"); err != nil {
+	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigRequestTimeoutSeconds, requestTimeoutSeconds, "非流式总超时 / 流式首响应超时秒数"); err != nil {
 		return err
 	}
 	streamIdleMs := int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000)
@@ -312,6 +351,13 @@ func timeoutMillisecondsToSeconds(timeoutMs int64) int64 {
 		return 1
 	}
 	return seconds
+}
+
+func normalizeContextCompactionThreshold(value int64) int64 {
+	if value < minContextCompactionThreshold || value > maxContextCompactionThreshold {
+		return defaultContextCompactionThreshold
+	}
+	return value
 }
 
 func resolveGatewayCapacity(input GatewayProxyConfigInput, fallback GatewayConfig) (gatewayCapacityConfig, error) {

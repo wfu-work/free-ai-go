@@ -174,9 +174,15 @@ system:
 
 freeai:
   proxy-prefix: /v1
+  # 非流式请求的总超时；流式请求仅限制首个 SSE 的等待时间。
   request-timeout-seconds: 120
+  # 流式响应开始后，连续没有新 SSE 事件的最大时长。
   stream-idle-timeout-seconds: 60
+  # 使用 Responses API 原生服务端压缩，在渲染上下文达到阈值时触发。
+  context-compaction-enabled: true
+  context-compaction-threshold-tokens: 100000
   max-retries: 1
+  # weighted_round_robin 会以账号权重为容量基线，并结合近期首响、过载率和当前并发动态分流
   routing-strategy: weighted_round_robin
   quota-refresh-seconds: 180
   cooldown-seconds: 300

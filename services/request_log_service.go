@@ -254,25 +254,36 @@ func (s RequestLogService) CleanupExpired(retentionDays int) error {
 func (s RequestLogService) Stats() (map[string]any, error) {
 	var total int64
 	var failures int64
+	var clientDisconnected int64
 	var avgLatency float64
 	if err := global.NAV_DB.Model(&domains.RequestLog{}).Count(&total).Error; err != nil {
 		return nil, err
 	}
-	if err := global.NAV_DB.Model(&domains.RequestLog{}).Where("status_code >= ? OR error_type <> ?", 400, "").Count(&failures).Error; err != nil {
+	if err := global.NAV_DB.Model(&domains.RequestLog{}).
+		Where("COALESCE(error_type, '') <> ? AND (status_code >= ? OR COALESCE(error_type, '') <> ?)", domains.ErrorClientDisconnected, 400, "").
+		Count(&failures).Error; err != nil {
+		return nil, err
+	}
+	if err := global.NAV_DB.Model(&domains.RequestLog{}).
+		Where("error_type = ?", domains.ErrorClientDisconnected).
+		Count(&clientDisconnected).Error; err != nil {
 		return nil, err
 	}
 	if err := global.NAV_DB.Model(&domains.RequestLog{}).Select("COALESCE(AVG(latency_ms), 0)").Scan(&avgLatency).Error; err != nil {
 		return nil, err
 	}
-	success := total - failures
+	// client_disconnected reflects downstream behavior, not gateway/upstream
+	// reliability. Keep it out of both service successes and service failures.
+	success := total - failures - clientDisconnected
 	if success < 0 {
 		success = 0
 	}
 	return map[string]any{
-		"total":        total,
-		"success":      success,
-		"failures":     failures,
-		"avgLatencyMs": avgLatency,
+		"total":              total,
+		"success":            success,
+		"failures":           failures,
+		"clientDisconnected": clientDisconnected,
+		"avgLatencyMs":       avgLatency,
 	}, nil
 }
 

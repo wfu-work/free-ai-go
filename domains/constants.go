@@ -28,6 +28,9 @@ const (
 	QuotaStatusExhausted = "exhausted"
 	QuotaStatusUnknown   = "unknown"
 
+	ResetCreditRedemptionPending   = "pending"
+	ResetCreditRedemptionCompleted = "completed"
+
 	TokenStatusActive        = "active"
 	TokenStatusRefreshNeeded = "refresh_needed"
 	TokenStatusRefreshFailed = "refresh_failed"
@@ -53,4 +56,5 @@ const (
 	ErrorPlatformKeyLimited = "platform_key_limited"
 
 	DiagnosticClientClosedAfterCompletion = "client_closed_after_completion"
+	DiagnosticContextCompacted            = "context_compacted"
 )

@@ -99,17 +99,19 @@ type FetchAccountModelsInput struct {
 }
 
 type RefreshUsageResult struct {
-	AccountGuid string                 `json:"accountGuid"`
-	UsageType   string                 `json:"usageType"`
-	Quotas      []domains.AccountQuota `json:"quotas"`
-	PlanType    string                 `json:"planType"`
-	Raw         any                    `json:"raw,omitempty"`
+	AccountGuid  string                     `json:"accountGuid"`
+	UsageType    string                     `json:"usageType"`
+	Quotas       []domains.AccountQuota     `json:"quotas"`
+	PlanType     string                     `json:"planType"`
+	Raw          any                        `json:"raw,omitempty"`
+	ResetCredits *AccountResetCreditSummary `json:"resetCredits,omitempty"`
 }
 
 type AccountListItem struct {
 	domains.Account
-	Quotas              []domains.AccountQuota `json:"quotas"`
-	AvailableModelCount int64                  `json:"availableModelCount"`
+	Quotas              []domains.AccountQuota     `json:"quotas"`
+	AvailableModelCount int64                      `json:"availableModelCount"`
+	ResetCredits        *AccountResetCreditSummary `json:"resetCredits,omitempty"`
 }
 
 type UsageRefreshSweepResult struct {
@@ -556,6 +558,7 @@ func attachAccountQuotas(accounts []domains.Account) []AccountListItem {
 	for _, account := range accounts {
 		items = append(items, AccountListItem{
 			Account: account, Quotas: byAccount[account.Guid], AvailableModelCount: countByAccount[account.Guid],
+			ResetCredits: resetCreditSummaryFromQuotas(byAccount[account.Guid]),
 		})
 	}
 	return items
@@ -565,6 +568,9 @@ func (s AccountService) DeleteByGuid(guid string) error {
 	account, _ := s.GetByGuid(guid)
 	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountQuota{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountResetCreditRedemption{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountModelAvailability{}).Error; err != nil {
@@ -742,6 +748,15 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 		}
 		quotas = append(quotas, items...)
 	}
+	if len(quotas) > 0 {
+		activeWindows := make([]string, 0, len(quotas))
+		for _, quota := range quotas {
+			activeWindows = append(activeWindows, quota.WindowType)
+		}
+		if err := QuotaServiceApp.ReconcileSnapshot(account.Guid, "wham", activeWindows); err != nil {
+			return RefreshUsageResult{}, err
+		}
+	}
 	updates := map[string]any{
 		"last_refreshed_at": time.Now().UnixMilli(), "last_error": "", "token_status": domains.TokenStatusActive,
 		"plan_type": firstNonEmpty(usage.PlanType, file.Meta.PlanType, account.PlanType),
@@ -767,7 +782,11 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	} else if subscriptionErr != nil {
 		raw["subscriptionWarning"] = subscriptionErr.Error()
 	}
-	return RefreshUsageResult{AccountGuid: account.Guid, UsageType: "wham", Quotas: allQuotas, PlanType: updates["plan_type"].(string), Raw: raw}, nil
+	var resetCredits *AccountResetCreditSummary
+	if summary, ok := resetCreditSummaryFromSnapshot(usage.RateLimitResetCredits); ok {
+		resetCredits = &summary
+	}
+	return RefreshUsageResult{AccountGuid: account.Guid, UsageType: "wham", Quotas: allQuotas, PlanType: updates["plan_type"].(string), Raw: raw, ResetCredits: resetCredits}, nil
 }
 
 func (s AccountService) fetchUsageWithFile(ctx context.Context, account domains.Account, file *codexauth.AccountFile) (*chatgpt.UsageSnapshot, error) {
