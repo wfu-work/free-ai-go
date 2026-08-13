@@ -116,10 +116,15 @@ func (a OpsApi) Usage(c *gin.Context) {
 	if days > 365 {
 		days = 365
 	}
-	to := time.Now().UnixMilli()
-	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	now := time.Now()
+	to := now.UnixMilli()
+	since := now.Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	granularity := services.UsageTimelineGranularityDay
+	if days == 1 {
+		granularity = services.UsageTimelineGranularityHour
+	}
 
-	result, err := services.RequestLogServiceApp.UsageSummary(since, to)
+	result, err := services.RequestLogServiceApp.UsageSummaryWithGranularity(since, to, granularity)
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 		return

@@ -21,7 +21,11 @@ type ProxyOutput struct {
 	Body       []byte
 }
 
-func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool) (ProxyOutput, error) {
+type ProxyIngressTiming struct {
+	GatewayQueueMs int64
+}
+
+func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, ingress ProxyIngressTiming) (ProxyOutput, error) {
 	start := time.Now()
 	requestID := strings.TrimSpace(r.Header.Get("X-FreeAi-Request-ID"))
 	logMeta := requestLogMeta(r, endpoint, body)
@@ -52,6 +56,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			ErrorType:       errorType,
 			ErrorSummary:    proxyErrorSummary(err),
 			LatencyMs:       time.Since(start).Milliseconds(),
+			GatewayQueueMs:  ingress.GatewayQueueMs,
 		})
 		return ProxyOutput{StatusCode: status}, err
 	}
@@ -77,6 +82,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			ErrorType:       domains.ErrorModelNotSupported,
 			ErrorSummary:    proxyErrorSummary(modelErr),
 			LatencyMs:       time.Since(start).Milliseconds(),
+			GatewayQueueMs:  ingress.GatewayQueueMs,
 		})
 		return ProxyOutput{StatusCode: http.StatusBadRequest}, modelErr
 	}
@@ -100,6 +106,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 				ErrorType:       domains.ErrorModelNotSupported,
 				ErrorSummary:    proxyErrorSummary(modelErr),
 				LatencyMs:       time.Since(start).Milliseconds(),
+				GatewayQueueMs:  ingress.GatewayQueueMs,
 			})
 			return ProxyOutput{StatusCode: http.StatusForbidden}, modelErr
 		}
@@ -124,6 +131,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
 			ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier), StatusCode: status,
 			ErrorType: errorType, ErrorSummary: proxyErrorSummary(err), LatencyMs: time.Since(start).Milliseconds(),
+			GatewayQueueMs: ingress.GatewayQueueMs,
 		})
 		return ProxyOutput{StatusCode: status}, err
 	}
@@ -220,6 +228,9 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	dnsMs := int64(0)
 	connectMs := int64(0)
 	tlsHandshakeMs := int64(0)
+	wroteRequestMs := int64(0)
+	requestUploadMs := int64(0)
+	upstreamWaitMs := int64(0)
 	upstreamHeaderMs := int64(0)
 	firstEventMs := int64(0)
 	firstTokenMs := int64(0)
@@ -238,6 +249,9 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		dnsMs = lastResult.DNSMs
 		connectMs = lastResult.ConnectMs
 		tlsHandshakeMs = lastResult.TLSHandshakeMs
+		wroteRequestMs = lastResult.WroteRequestMs
+		requestUploadMs = lastResult.RequestUploadMs
+		upstreamWaitMs = lastResult.UpstreamWaitMs
 		upstreamHeaderMs = lastResult.UpstreamHeaderMs
 		firstEventMs = lastResult.FirstEventMs
 		firstTokenMs = lastResult.FirstTokenMs
@@ -283,10 +297,14 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		SwitchCount:       len(switchReasons),
 		SwitchReason:      strings.Join(switchReasons, ";"),
 		LatencyMs:         latencyMs,
+		GatewayQueueMs:    ingress.GatewayQueueMs,
 		PreparationMs:     preparationMs,
 		DNSMs:             dnsMs,
 		ConnectMs:         connectMs,
 		TLSHandshakeMs:    tlsHandshakeMs,
+		WroteRequestMs:    wroteRequestMs,
+		RequestUploadMs:   requestUploadMs,
+		UpstreamWaitMs:    upstreamWaitMs,
 		UpstreamHeaderMs:  upstreamHeaderMs,
 		FirstEventMs:      firstEventMs,
 		FirstTokenMs:      firstTokenMs,

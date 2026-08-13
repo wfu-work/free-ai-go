@@ -16,6 +16,15 @@ type RequestLogService struct{}
 
 var RequestLogServiceApp = RequestLogService{}
 
+// UsageTimelineGranularity 指定用量趋势的时间桶粒度。
+type UsageTimelineGranularity string
+
+const (
+	UsageTimelineGranularityAuto UsageTimelineGranularity = "auto"
+	UsageTimelineGranularityHour UsageTimelineGranularity = "hour"
+	UsageTimelineGranularityDay  UsageTimelineGranularity = "day"
+)
+
 // UsageDimension 是用量分析按一个维度聚合后的统计结果。
 type UsageDimension struct {
 	Dimension    string  `json:"dimension" gorm:"column:dimension"`
@@ -96,10 +105,14 @@ type RequestLogInput struct {
 	SwitchCount       int
 	SwitchReason      string
 	LatencyMs         int64
+	GatewayQueueMs    int64
 	PreparationMs     int64
 	DNSMs             int64
 	ConnectMs         int64
 	TLSHandshakeMs    int64
+	WroteRequestMs    int64
+	RequestUploadMs   int64
+	UpstreamWaitMs    int64
 	UpstreamHeaderMs  int64
 	FirstEventMs      int64
 	FirstTokenMs      int64
@@ -140,10 +153,14 @@ func (s RequestLogService) Record(input RequestLogInput) error {
 		SwitchCount:       input.SwitchCount,
 		SwitchReason:      input.SwitchReason,
 		LatencyMs:         input.LatencyMs,
+		GatewayQueueMs:    input.GatewayQueueMs,
 		PreparationMs:     input.PreparationMs,
 		DNSMs:             input.DNSMs,
 		ConnectMs:         input.ConnectMs,
 		TLSHandshakeMs:    input.TLSHandshakeMs,
+		WroteRequestMs:    input.WroteRequestMs,
+		RequestUploadMs:   input.RequestUploadMs,
+		UpstreamWaitMs:    input.UpstreamWaitMs,
 		UpstreamHeaderMs:  input.UpstreamHeaderMs,
 		FirstEventMs:      input.FirstEventMs,
 		FirstTokenMs:      input.FirstTokenMs,
@@ -299,6 +316,15 @@ type usageTotalsRow struct {
 
 // UsageSummary 按模型、账号和 API 密钥统计请求用量，避免前端拉取大量日志后重复聚合。
 func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error) {
+	return s.usageSummary(since, until, UsageTimelineGranularityAuto)
+}
+
+// UsageSummaryWithGranularity 按指定时间粒度生成用量趋势。
+func (s RequestLogService) UsageSummaryWithGranularity(since, until int64, granularity UsageTimelineGranularity) (UsageSummary, error) {
+	return s.usageSummary(since, until, granularity)
+}
+
+func (s RequestLogService) usageSummary(since, until int64, granularity UsageTimelineGranularity) (UsageSummary, error) {
 	if until <= 0 {
 		until = time.Now().UnixMilli()
 	}
@@ -334,7 +360,7 @@ func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error
 	if err != nil {
 		return UsageSummary{}, err
 	}
-	timeline, modelTimeline, err := queryUsageTimeline(newUsageQuery(), since, until, models)
+	timeline, modelTimeline, err := queryUsageTimeline(newUsageQuery(), since, until, models, granularity)
 	if err != nil {
 		return UsageSummary{}, err
 	}
@@ -365,8 +391,8 @@ type usageTimelineRow struct {
 
 // queryUsageTimeline 按时间窗口生成连续趋势点。最近 24 小时按小时聚合，
 // 更长时间按天或最多 90 个时间桶聚合，避免长周期数据拖慢管理端渲染。
-func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension) ([]UsageTimelinePoint, []ModelUsageTimelineSeries, error) {
-	bucketCount, bucketSize := usageTimelineBuckets(since, until)
+func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension, granularity UsageTimelineGranularity) ([]UsageTimelinePoint, []ModelUsageTimelineSeries, error) {
+	bucketCount, bucketSize := usageTimelineBuckets(since, until, granularity)
 
 	points := make([]UsageTimelinePoint, bucketCount)
 	for i := range points {
@@ -436,7 +462,7 @@ func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension
 	return points, modelSeries, nil
 }
 
-func usageTimelineBuckets(since, until int64) (int, int64) {
+func usageTimelineBuckets(since, until int64, granularity UsageTimelineGranularity) (int, int64) {
 	const maxBuckets = 90
 	hourMs := time.Hour.Milliseconds()
 	dayMs := (24 * time.Hour).Milliseconds()
@@ -446,8 +472,14 @@ func usageTimelineBuckets(since, until int64) (int, int64) {
 	}
 
 	bucketSize := dayMs
-	if duration <= dayMs {
+	switch granularity {
+	case UsageTimelineGranularityHour:
 		bucketSize = hourMs
+	case UsageTimelineGranularityDay:
+	default:
+		if duration <= dayMs {
+			bucketSize = hourMs
+		}
 	}
 	bucketCount := int((duration + bucketSize - 1) / bucketSize)
 	if bucketCount < 1 {

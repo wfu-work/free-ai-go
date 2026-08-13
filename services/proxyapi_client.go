@@ -49,6 +49,9 @@ type ProxyResult struct {
 	DNSMs              int64
 	ConnectMs          int64
 	TLSHandshakeMs     int64
+	WroteRequestMs     int64
+	RequestUploadMs    int64
+	UpstreamWaitMs     int64
 	UpstreamHeaderMs   int64
 	FirstEventMs       int64
 	FirstTokenMs       int64
@@ -257,18 +260,171 @@ func applyUpstreamTiming(result *ProxyResult, preparationMs int64, trace *upstre
 	result.DNSMs = timing.DNSMs
 	result.ConnectMs = timing.ConnectMs
 	result.TLSHandshakeMs = timing.TLSHandshakeMs
+	result.WroteRequestMs = timing.WroteRequestMs
+	result.RequestUploadMs = timing.RequestUploadMs
+	result.UpstreamWaitMs = timing.UpstreamWaitMs
 	result.UpstreamHeaderMs = timing.UpstreamHeaderMs
 	result.ConnectionReused = timing.ConnectionReused
 	result.ConnectionTraced = timing.GotConnection
 }
 
 func isContentStreamEvent(event openai.StreamEvent) bool {
-	switch event.Type {
-	case openai.EventResponseOutputTextDelta, openai.EventResponseFunctionArgumentsDelta:
-		return true
-	default:
-		return strings.HasPrefix(event.Type, "response.reasoning") && strings.HasSuffix(event.Type, ".delta")
+	eventType := streamEventType(event)
+	if strings.HasPrefix(eventType, "response.") && strings.HasSuffix(eventType, ".delta") {
+		return streamDeltaHasContent(event.Data)
 	}
+	if eventType == openai.EventResponseOutputItemAdded {
+		if added, ok := event.OutputItemAdded(); ok {
+			return responseItemHasGeneratedContent(added.Item)
+		}
+		return false
+	}
+	if strings.HasSuffix(eventType, "_part.added") {
+		return streamPayloadHasContent(event.Data, "part")
+	}
+	if eventType == "response.image_generation_call.partial_image" {
+		return streamPayloadHasContent(event.Data, "partial_image_b64")
+	}
+	if strings.HasSuffix(eventType, ".done") {
+		return streamPayloadHasContent(event.Data, "text", "refusal", "arguments", "code", "input", "transcript", "encrypted_content", "item", "part", "content", "summary", "output")
+	}
+	if eventType == openai.EventResponseCompleted {
+		if completed, ok := event.CompletedResponse(); ok && responseHasGeneratedContent(completed) {
+			return true
+		}
+		return streamPayloadHasContent(event.Data, "response")
+	}
+	return false
+}
+
+func streamEventType(event openai.StreamEvent) string {
+	eventType := strings.ToLower(strings.TrimSpace(event.Type))
+	if eventType != "" {
+		return eventType
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(event.Data, &payload) == nil {
+		return strings.ToLower(strings.TrimSpace(payload.Type))
+	}
+	return ""
+}
+
+// streamDeltaHasContent 对当前已知和未来新增的 Responses delta 事件统一识别。
+// 无法解析时信任事件类型，避免新事件再次漏记；已明确携带空 delta 的生命
+// 周期占位事件不计作首 Token。未来事件若改用新字段，仍需至少携带额外字段。
+func streamDeltaHasContent(data json.RawMessage) bool {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return true
+	}
+	delta, ok := payload["delta"]
+	if !ok {
+		for key, value := range payload {
+			if key != "type" && key != "sequence_number" && rawJSONHasContent(value) {
+				return true
+			}
+		}
+		return false
+	}
+	return rawJSONHasContent(delta)
+}
+
+func streamPayloadHasContent(data json.RawMessage, keys ...string) bool {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(data, &payload) != nil {
+		return false
+	}
+	for _, key := range keys {
+		if rawJSONHasGeneratedContent(payload[key]) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawJSONHasGeneratedContent(raw json.RawMessage) bool {
+	if !rawJSONHasContent(raw) {
+		return false
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	return jsonValueHasGeneratedContent(value)
+}
+
+func rawJSONHasContent(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return typed != ""
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	default:
+		return true
+	}
+}
+
+func jsonValueHasGeneratedContent(value any) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if jsonValueHasGeneratedContent(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		itemType, _ := typed["type"].(string)
+		if strings.HasSuffix(strings.ToLower(itemType), "_call") {
+			return true
+		}
+		for _, key := range []string{"delta", "text", "refusal", "arguments", "code", "input", "transcript", "encrypted_content", "partial_image_b64"} {
+			if value, ok := typed[key]; ok && jsonValueHasGeneratedContent(value) {
+				return true
+			}
+		}
+		for _, key := range []string{"item", "part", "content", "summary", "output", "response"} {
+			if value, ok := typed[key]; ok && jsonValueHasGeneratedContent(value) {
+				return true
+			}
+		}
+	case string:
+		return typed != ""
+	}
+	return false
+}
+
+func responseHasGeneratedContent(response *openai.Response) bool {
+	if response == nil {
+		return false
+	}
+	for _, item := range response.Output {
+		if responseItemHasGeneratedContent(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func responseItemHasGeneratedContent(item openai.ResponseItem) bool {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(item.Type)), "_call") {
+		return true
+	}
+	for _, content := range item.Content {
+		if content.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {

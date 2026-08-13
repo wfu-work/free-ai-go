@@ -149,12 +149,15 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		maxConcurrent = 128
 	}
 	queueTimeout := time.Duration(cfg.OverloadQueueTimeoutMs) * time.Millisecond
+	queueStartedAt := time.Now()
 	if !acquireProxyRequestSlot(c.Request.Context(), maxConcurrent, queueTimeout) {
+		gatewayQueueMs := time.Since(queueStartedAt).Milliseconds()
 		c.Header("Retry-After", "1")
-		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded", "too many concurrent requests")
+		recordProxyRejection(c, requestID, endpoint, http.StatusTooManyRequests, "server_overloaded", "too many concurrent requests", gatewayQueueMs)
 		c.JSON(http.StatusTooManyRequests, openAIError("server_overloaded", "too many concurrent requests"))
 		return
 	}
+	gatewayQueueMs := time.Since(queueStartedAt).Milliseconds()
 	defer releaseProxyRequestSlot()
 
 	maxBodyBytes := cfg.MaxRequestBodyBytes
@@ -166,23 +169,23 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			recordProxyRejection(c, requestID, endpoint, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+			recordProxyRejection(c, requestID, endpoint, http.StatusRequestEntityTooLarge, "request_too_large", err.Error(), gatewayQueueMs)
 			c.JSON(http.StatusRequestEntityTooLarge, openAIError("request_too_large", "request body exceeds the configured limit"))
 			return
 		}
-		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error())
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error(), gatewayQueueMs)
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
 		return
 	}
 	model, stream, err := readProxyMetadata(body)
 	if err != nil {
-		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error())
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", err.Error(), gatewayQueueMs)
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", err.Error()))
 		return
 	}
 	if endpoint == "/v1/images/generations" && stream {
 		message := "streaming is not supported by /v1/images/generations"
-		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", message)
+		recordProxyRejection(c, requestID, endpoint, http.StatusBadRequest, "invalid_request_error", message, gatewayQueueMs)
 		c.JSON(http.StatusBadRequest, openAIError("invalid_request_error", message))
 		return
 	}
@@ -194,7 +197,7 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 	}
-	out, err := proxyService.Handle(c.Request, c.Writer, endpoint, body, stream)
+	out, err := proxyService.Handle(c.Request, c.Writer, endpoint, body, stream, services.ProxyIngressTiming{GatewayQueueMs: gatewayQueueMs})
 	if err != nil {
 		if stream && out.StatusCode >= 200 && out.StatusCode < 300 {
 			return
@@ -337,11 +340,12 @@ func releaseProxyRequestSlot() {
 	proxyRequestGate.Unlock()
 }
 
-func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType, errorSummary string) {
+func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType, errorSummary string, gatewayQueueMs int64) {
 	_ = services.RequestLogServiceApp.Record(services.RequestLogInput{
 		RequestID: requestID, Method: c.Request.Method, Path: endpoint,
 		KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
 		StatusCode: status, ErrorType: errorType, ErrorSummary: errorSummary,
+		GatewayQueueMs: gatewayQueueMs,
 	})
 }
 

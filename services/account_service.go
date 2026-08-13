@@ -112,6 +112,20 @@ type AccountListItem struct {
 	Quotas              []domains.AccountQuota     `json:"quotas"`
 	AvailableModelCount int64                      `json:"availableModelCount"`
 	ResetCredits        *AccountResetCreditSummary `json:"resetCredits,omitempty"`
+	GatewayUsage        AccountGatewayUsage        `json:"gatewayUsage"`
+}
+
+// AccountGatewayUsage 是账号在本地请求日志保留窗口内的网关用量。
+// CostAvailable 仅在窗口内所有具有 Token 用量的请求都匹配到官方参考价时为 true，避免把缺失定价展示成零成本。
+type AccountGatewayUsage struct {
+	Since          int64   `json:"since"`
+	Until          int64   `json:"until"`
+	Requests       int64   `json:"requests"`
+	TotalTokens    int64   `json:"totalTokens"`
+	CostMicrousd   int64   `json:"costMicrousd"`
+	CostAmount     float64 `json:"costAmount"`
+	PricedRequests int64   `json:"pricedRequests"`
+	CostAvailable  bool    `json:"costAvailable"`
 }
 
 type UsageRefreshSweepResult struct {
@@ -505,7 +519,8 @@ func (s AccountService) List(params map[string]string) (list interface{}, total 
 	if err = db.Order("priority asc, id desc").Limit(limit).Offset(offset).Find(&results).Error; err != nil {
 		return nil, 0, err
 	}
-	return attachAccountQuotas(results), total, nil
+	items, err := attachAccountQuotas(results)
+	return items, total, err
 }
 
 func normalizeOfficialAccountIdentity(vendorCode string) (string, string, error) {
@@ -527,10 +542,10 @@ func (s AccountService) ListAll() ([]domains.Account, error) {
 	return list, err
 }
 
-func attachAccountQuotas(accounts []domains.Account) []AccountListItem {
+func attachAccountQuotas(accounts []domains.Account) ([]AccountListItem, error) {
 	items := make([]AccountListItem, 0, len(accounts))
 	if len(accounts) == 0 {
-		return items
+		return items, nil
 	}
 	guids := make([]string, 0, len(accounts))
 	for _, account := range accounts {
@@ -555,13 +570,68 @@ func attachAccountQuotas(accounts []domains.Account) []AccountListItem {
 	for _, count := range modelCounts {
 		countByAccount[count.AccountGuid] = count.Count
 	}
+	until := time.Now().UnixMilli()
+	since := until - 30*24*time.Hour.Milliseconds()
+	usageByAccount, err := queryAccountGatewayUsage(global.NAV_DB, guids, since, until)
+	if err != nil {
+		return nil, err
+	}
 	for _, account := range accounts {
+		usage, ok := usageByAccount[account.Guid]
+		if !ok {
+			usage = AccountGatewayUsage{Since: since, Until: until, CostAvailable: true}
+		}
 		items = append(items, AccountListItem{
 			Account: account, Quotas: byAccount[account.Guid], AvailableModelCount: countByAccount[account.Guid],
-			ResetCredits: resetCreditSummaryFromQuotas(byAccount[account.Guid]),
+			ResetCredits: resetCreditSummaryFromQuotas(byAccount[account.Guid]), GatewayUsage: usage,
 		})
 	}
-	return items
+	return items, nil
+}
+
+type accountGatewayUsageRow struct {
+	AccountGuid       string `gorm:"column:account_guid"`
+	Requests          int64  `gorm:"column:requests"`
+	InputTokens       int64  `gorm:"column:input_tokens"`
+	OutputTokens      int64  `gorm:"column:output_tokens"`
+	CostMicrousd      int64  `gorm:"column:cost_microusd"`
+	PriceableRequests int64  `gorm:"column:priceable_requests"`
+	PricedRequests    int64  `gorm:"column:priced_requests"`
+}
+
+func queryAccountGatewayUsage(db *gorm.DB, accountGuids []string, since, until int64) (map[string]AccountGatewayUsage, error) {
+	usageByAccount := make(map[string]AccountGatewayUsage, len(accountGuids))
+	if len(accountGuids) == 0 {
+		return usageByAccount, nil
+	}
+	var rows []accountGatewayUsageRow
+	err := db.Model(&domains.RequestLog{}).
+		Select(`account_guid,
+			COUNT(*) AS requests,
+			COALESCE(SUM(input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(output_tokens), 0) AS output_tokens,
+			COALESCE(SUM(CASE WHEN pricing_matched THEN cost_microusd ELSE 0 END), 0) AS cost_microusd,
+			COALESCE(SUM(CASE WHEN input_tokens > 0 OR output_tokens > 0 THEN 1 ELSE 0 END), 0) AS priceable_requests,
+			COALESCE(SUM(CASE WHEN (input_tokens > 0 OR output_tokens > 0) AND pricing_matched THEN 1 ELSE 0 END), 0) AS priced_requests`).
+		Where("account_guid IN ? AND created_at_unix >= ? AND created_at_unix <= ?", accountGuids, since, until).
+		Group("account_guid").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		usageByAccount[row.AccountGuid] = AccountGatewayUsage{
+			Since:          since,
+			Until:          until,
+			Requests:       row.Requests,
+			TotalTokens:    row.InputTokens + row.OutputTokens,
+			CostMicrousd:   row.CostMicrousd,
+			CostAmount:     microusdToUSD(row.CostMicrousd),
+			PricedRequests: row.PricedRequests,
+			CostAvailable:  row.PricedRequests == row.PriceableRequests,
+		}
+	}
+	return usageByAccount, nil
 }
 
 func (s AccountService) DeleteByGuid(guid string) error {

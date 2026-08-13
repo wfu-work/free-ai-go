@@ -25,10 +25,14 @@ type RequestLog struct {
 	SwitchCount       int     `json:"switchCount" gorm:"comment:切换次数"`
 	SwitchReason      string  `json:"switchReason" gorm:"comment:切换原因"`
 	LatencyMs         int64   `json:"latencyMs" gorm:"comment:总耗时"`
+	GatewayQueueMs    int64   `json:"gatewayQueueMs" gorm:"comment:网关并发排队耗时"`
 	PreparationMs     int64   `json:"preparationMs" gorm:"comment:上游请求准备耗时"`
 	DNSMs             int64   `json:"dnsMs" gorm:"comment:DNS解析耗时"`
 	ConnectMs         int64   `json:"connectMs" gorm:"comment:连接建立耗时"`
 	TLSHandshakeMs    int64   `json:"tlsHandshakeMs" gorm:"comment:TLS握手耗时"`
+	WroteRequestMs    int64   `json:"wroteRequestMs" gorm:"comment:上游请求写完里程碑耗时"`
+	RequestUploadMs   int64   `json:"requestUploadMs" gorm:"comment:上游请求上传耗时"`
+	UpstreamWaitMs    int64   `json:"upstreamWaitMs" gorm:"comment:请求写完到上游首字节耗时"`
 	UpstreamHeaderMs  int64   `json:"upstreamHeaderMs" gorm:"comment:上游响应头耗时"`
 	FirstEventMs      int64   `json:"firstEventMs" gorm:"comment:首个SSE事件耗时"`
 	FirstTokenMs      int64   `json:"firstTokenMs" gorm:"comment:首个正文Token耗时"`
