@@ -36,6 +36,13 @@ var platformKeyLastUsed = struct {
 	writtenAt: map[string]int64{},
 }
 
+var platformKeyConcurrency = struct {
+	sync.RWMutex
+	inFlight map[string]int
+}{
+	inFlight: map[string]int{},
+}
+
 type rateWindow struct {
 	StartedAt int64
 	Count     int
@@ -62,6 +69,12 @@ type CreatePlatformKeyOutput struct {
 type PlatformKeyStatsOutput struct {
 	TotalTokens int64   `json:"totalTokens"`
 	TotalAmount float64 `json:"totalAmount"`
+}
+
+type PlatformKeyConcurrencyOutput struct {
+	Total                 int            `json:"total"`
+	MaxConcurrentRequests int            `json:"maxConcurrentRequests"`
+	ByKey                 map[string]int `json:"byKey"`
 }
 
 func (s PlatformKeyService) Create(input CreatePlatformKeyInput) (CreatePlatformKeyOutput, error) {
@@ -209,6 +222,54 @@ func (s PlatformKeyService) Stats() (PlatformKeyStatsOutput, error) {
 		TotalTokens: usedTokens,
 		TotalAmount: microusdToUSD(usedCostMicrousd),
 	}, nil
+}
+
+// TrackConcurrentRequest records one authenticated proxy request until its
+// response finishes. The returned release function is safe to call repeatedly.
+func (s PlatformKeyService) TrackConcurrentRequest(guid string) func() {
+	guid = strings.TrimSpace(guid)
+	if guid == "" {
+		return func() {}
+	}
+	platformKeyConcurrency.Lock()
+	platformKeyConcurrency.inFlight[guid]++
+	platformKeyConcurrency.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			platformKeyConcurrency.Lock()
+			if platformKeyConcurrency.inFlight[guid] <= 1 {
+				delete(platformKeyConcurrency.inFlight, guid)
+			} else {
+				platformKeyConcurrency.inFlight[guid]--
+			}
+			platformKeyConcurrency.Unlock()
+		})
+	}
+}
+
+// ConcurrencyStats returns the current process's authenticated in-flight
+// requests grouped by platform key.
+func (s PlatformKeyService) ConcurrencyStats() PlatformKeyConcurrencyOutput {
+	byKey := make(map[string]int)
+	total := 0
+	platformKeyConcurrency.RLock()
+	for guid, count := range platformKeyConcurrency.inFlight {
+		byKey[guid] = count
+		total += count
+	}
+	platformKeyConcurrency.RUnlock()
+
+	maxConcurrent := Config().MaxConcurrentRequests
+	if maxConcurrent <= 0 {
+		maxConcurrent = 128
+	}
+	return PlatformKeyConcurrencyOutput{
+		Total:                 total,
+		MaxConcurrentRequests: maxConcurrent,
+		ByKey:                 byKey,
+	}
 }
 
 func (s PlatformKeyService) Verify(header string) (domains.PlatformKey, error) {

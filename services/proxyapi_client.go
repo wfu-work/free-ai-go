@@ -221,6 +221,7 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	if streamErr != nil || streamCtx.Err() != nil {
 		streamErr = streamContextError(streamCtx, ctx, streamErr)
 	}
+	streamErr = applyPostCompletionStreamError(result, responseCompleted, streamErr)
 	if req.Endpoint == "/v1/chat/completions" && result.StreamStarted && streamErr == nil {
 		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 			if writeErr := applyStreamDoneWriteError(result, responseCompleted, err); writeErr != nil {
@@ -487,6 +488,23 @@ func classifyDownstreamWriteError(err error) string {
 		return ""
 	}
 	return domains.ErrorClientDisconnected
+}
+
+// applyPostCompletionStreamError 将 response.completed 之后由下游取消造成的流结束
+// 视为成功。此时完整响应和用量均已收到，取消只说明客户端没有继续等待连接收尾。
+// 完成事件之前的取消以及超时、协议错误等上游异常仍按原错误返回。
+func applyPostCompletionStreamError(result *ProxyResult, responseCompleted bool, err error) error {
+	if err == nil || result == nil || !responseCompleted {
+		return err
+	}
+	if classifyError(err) != domains.ErrorClientDisconnected {
+		return err
+	}
+	result.ErrorType = ""
+	result.ErrorSummary = ""
+	result.DiagnosticType = domains.DiagnosticClientClosedAfterCompletion
+	result.DiagnosticSummary = proxyErrorSummary(err)
+	return nil
 }
 
 // applyStreamDoneWriteError 只豁免已收到 response.completed 后最终 [DONE] 标记的写入失败。

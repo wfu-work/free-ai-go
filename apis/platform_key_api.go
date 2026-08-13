@@ -204,6 +204,12 @@ func (a PlatformKeyApi) Stats(c *gin.Context) {
 	response.Ok(stats, c)
 }
 
+// Concurrency 获取当前实例按平台密钥统计的在途请求数。
+// @Router /platform-keys/concurrency [get]
+func (a PlatformKeyApi) Concurrency(c *gin.Context) {
+	response.Ok(platformKeyService.ConcurrencyStats(), c)
+}
+
 // GetByGuid 获取密钥信息
 // @Summary 根据guid获取密钥
 // @Description 根据guid获取密钥

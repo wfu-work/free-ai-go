@@ -55,6 +55,8 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		})
 		return ProxyOutput{StatusCode: status}, err
 	}
+	releaseConcurrency := PlatformKeyServiceApp.TrackConcurrentRequest(platformKey.Guid)
+	defer releaseConcurrency()
 	if platformKey.BoundModel != "" {
 		modelName = platformKey.BoundModel
 		logMeta.Model = modelName

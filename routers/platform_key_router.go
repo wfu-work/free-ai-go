@@ -25,6 +25,7 @@ func (r PlatformKeyRouter) InitPlatformKeyRouter(group *gin.RouterGroup) {
 		router.GET("list", platformKeyApi.List)
 		router.GET("list/all", platformKeyApi.ListAll)
 		router.GET("stats", platformKeyApi.Stats)
+		router.GET("concurrency", platformKeyApi.Concurrency)
 		router.GET(":guid", platformKeyApi.GetByGuid)
 	}
 }

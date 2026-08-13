@@ -363,24 +363,10 @@ type usageTimelineRow struct {
 	CostMicrousd  int64  `gorm:"column:cost_microusd"`
 }
 
-// queryUsageTimeline 按时间窗口生成连续趋势点。最多返回 90 个点，避免长周期数据拖慢管理端渲染。
+// queryUsageTimeline 按时间窗口生成连续趋势点。最近 24 小时按小时聚合，
+// 更长时间按天或最多 90 个时间桶聚合，避免长周期数据拖慢管理端渲染。
 func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension) ([]UsageTimelinePoint, []ModelUsageTimelineSeries, error) {
-	const maxBuckets = 90
-	dayMs := (24 * time.Hour).Milliseconds()
-	duration := until - since
-	if duration <= 0 {
-		duration = dayMs
-	}
-
-	bucketCount := int((duration + dayMs - 1) / dayMs)
-	if bucketCount < 1 {
-		bucketCount = 1
-	}
-	bucketSize := dayMs
-	if bucketCount > maxBuckets {
-		bucketCount = maxBuckets
-		bucketSize = (duration + int64(bucketCount) - 1) / int64(bucketCount)
-	}
+	bucketCount, bucketSize := usageTimelineBuckets(since, until)
 
 	points := make([]UsageTimelinePoint, bucketCount)
 	for i := range points {
@@ -448,6 +434,30 @@ func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension
 		modelSeries = modelSeries[:otherModelIndex]
 	}
 	return points, modelSeries, nil
+}
+
+func usageTimelineBuckets(since, until int64) (int, int64) {
+	const maxBuckets = 90
+	hourMs := time.Hour.Milliseconds()
+	dayMs := (24 * time.Hour).Milliseconds()
+	duration := until - since
+	if duration <= 0 {
+		duration = dayMs
+	}
+
+	bucketSize := dayMs
+	if duration <= dayMs {
+		bucketSize = hourMs
+	}
+	bucketCount := int((duration + bucketSize - 1) / bucketSize)
+	if bucketCount < 1 {
+		bucketCount = 1
+	}
+	if bucketCount > maxBuckets {
+		bucketCount = maxBuckets
+		bucketSize = (duration + int64(bucketCount) - 1) / int64(bucketCount)
+	}
+	return bucketCount, bucketSize
 }
 
 // newModelUsageTimeline 初始化调用量最高的 5 个模型，并为剩余模型预留“其他”系列。
