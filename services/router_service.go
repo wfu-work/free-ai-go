@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,17 @@ type RouterService struct{}
 var RouterServiceApp = RouterService{}
 
 var routeStateLocks sync.Map
+
+const (
+	routingStrategyPriorityFirst            = "priority_first"
+	routingStrategyRoundRobin               = "round_robin"
+	routingStrategyAdaptiveWeighted         = "weighted_round_robin"
+	routingStrategyStaticWeightedRoundRobin = "static_weighted_round_robin"
+	routingStrategyLeastRecentlyUsed        = "least_recently_used"
+	routingStrategyMostQuotaRemaining       = "most_quota_remaining"
+	routingStrategySessionAffinity          = "session_affinity"
+	routingStrategyQuotaAwareAdaptive       = "quota_aware_adaptive"
+)
 
 type RouteSelection struct {
 	Model                 RoutedModel     `json:"model"`
@@ -57,6 +69,10 @@ func (s RouterService) HasAvailableAccount(model RoutedModel, key domains.Platfo
 }
 
 func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, key domains.PlatformKey) (RouteSelection, error) {
+	return s.SelectForKeyWithAffinity(modelName, excluded, key, "")
+}
+
+func (s RouterService) SelectForKeyWithAffinity(modelName string, excluded map[string]bool, key domains.PlatformKey, affinityKey string) (RouteSelection, error) {
 	model, err := ModelServiceApp.Find(modelName)
 	if err != nil {
 		return RouteSelection{}, err
@@ -86,12 +102,15 @@ func (s RouterService) SelectForKey(modelName string, excluded map[string]bool, 
 		return RouteSelection{}, errors.New(domains.ErrorNoAvailableAccount)
 	}
 	strategy := Config().RoutingStrategy
-	account := s.pickByStrategy(model, candidates, strategy)
+	if strings.TrimSpace(affinityKey) == "" {
+		affinityKey = key.Guid
+	}
+	account := s.pickByStrategyWithAffinity(model, candidates, strategy, affinityKey)
 	return RouteSelection{
 		Model:                 model,
 		Account:               account,
 		AvailableAccountCount: len(candidates),
-		AdaptiveAcquired:      strategy == "weighted_round_robin",
+		AdaptiveAcquired:      strategy == routingStrategyAdaptiveWeighted || strategy == routingStrategyQuotaAwareAdaptive,
 	}, nil
 }
 
@@ -101,30 +120,46 @@ func (s RouterService) pick(model RoutedModel, accounts []domains.Account) domai
 }
 
 func (s RouterService) pickByStrategy(model RoutedModel, accounts []domains.Account, strategy string) domains.Account {
+	return s.pickByStrategyWithAffinity(model, accounts, strategy, "")
+}
+
+func (s RouterService) pickByStrategyWithAffinity(model RoutedModel, accounts []domains.Account, strategy, affinityKey string) domains.Account {
 	switch strategy {
-	case "round_robin":
+	case routingStrategyRoundRobin:
 		return s.pickRoundRobin(model, accounts, false)
-	case "weighted_round_robin":
-		return s.pickAdaptiveWeighted(model, accounts)
-	case "least_recently_used":
+	case routingStrategyAdaptiveWeighted:
+		return s.pickAdaptiveWeighted(model, accounts, false)
+	case routingStrategyQuotaAwareAdaptive:
+		return s.pickAdaptiveWeighted(model, accounts, true)
+	case routingStrategyStaticWeightedRoundRobin:
+		return s.pickRoundRobin(model, accounts, true)
+	case routingStrategyLeastRecentlyUsed:
 		sort.SliceStable(accounts, func(i, j int) bool {
 			return accounts[i].LastUsedAt < accounts[j].LastUsedAt
 		})
 		return accounts[0]
-	case "most_quota_remaining":
+	case routingStrategyMostQuotaRemaining:
 		if account, ok := s.pickMostQuotaRemaining(accounts); ok {
 			return account
 		}
 		return accounts[0]
-	case "priority_first":
+	case routingStrategySessionAffinity:
+		return pickSessionAffinityAccount(model, accounts, affinityKey)
+	case routingStrategyPriorityFirst:
 		fallthrough
 	default:
 		return accounts[0]
 	}
 }
 
-func (s RouterService) pickAdaptiveWeighted(model RoutedModel, accounts []domains.Account) domains.Account {
-	routeKey := fmt.Sprintf("%s:%s:adaptive", model.AccountGroup, model.PublicModel)
+func (s RouterService) pickAdaptiveWeighted(model RoutedModel, accounts []domains.Account, quotaAware bool) domains.Account {
+	mode := "adaptive"
+	quotaFactors := map[string]float64(nil)
+	if quotaAware {
+		mode = "quota-adaptive"
+		quotaFactors, _ = loadQuotaAdaptiveRouteFactors(accounts, time.Now())
+	}
+	routeKey := fmt.Sprintf("%s:%s:%s", model.AccountGroup, model.PublicModel, mode)
 	state := domains.RouteState{}
 	cursor, redisCursor := s.redisRouteCursor(routeKey)
 	if !redisCursor {
@@ -135,7 +170,7 @@ func (s RouterService) pickAdaptiveWeighted(model RoutedModel, accounts []domain
 		state = s.routeState(routeKey)
 		cursor = state.Cursor
 	}
-	selected := adaptiveRouteMetrics.pickAndAcquire(accounts, cursor, time.Now())
+	selected := adaptiveRouteMetrics.pickAndAcquireWithQuota(accounts, cursor, time.Now(), quotaFactors)
 	if selected.Guid == "" {
 		selected = accounts[0]
 	}
@@ -163,40 +198,40 @@ func (s RouterService) pickRoundRobin(model RoutedModel, accounts []domains.Acco
 		state = s.routeState(routeKey)
 		cursor = state.Cursor
 	}
-	var selected domains.Account
-	if weighted {
-		totalWeight := 0
-		for _, account := range accounts {
-			if account.Weight <= 0 {
-				account.Weight = 1
-			}
-			totalWeight += account.Weight
-		}
-		if totalWeight <= 0 {
-			totalWeight = len(accounts)
-		}
-		offset := cursor % totalWeight
-		for _, account := range accounts {
-			weight := account.Weight
-			if weight <= 0 {
-				weight = 1
-			}
-			if offset < weight {
-				selected = account
-				break
-			}
-			offset -= weight
-		}
-	} else {
-		selected = accounts[cursor%len(accounts)]
-	}
-	if selected.Guid == "" {
-		selected = accounts[0]
-	}
+	selected := pickRoundRobinAccount(accounts, cursor, weighted)
 	if !redisCursor {
 		s.saveRouteState(state, selected.Guid, cursor+1)
 	}
 	return selected
+}
+
+func pickRoundRobinAccount(accounts []domains.Account, cursor int, weighted bool) domains.Account {
+	if len(accounts) == 0 {
+		return domains.Account{}
+	}
+	cursor = max(cursor, 0)
+	if weighted {
+		totalWeight := 0
+		for _, account := range accounts {
+			totalWeight += normalizedRouteWeight(account.Weight)
+		}
+		offset := cursor % totalWeight
+		for _, account := range accounts {
+			weight := normalizedRouteWeight(account.Weight)
+			if offset < weight {
+				return account
+			}
+			offset -= weight
+		}
+	}
+	return accounts[cursor%len(accounts)]
+}
+
+func normalizedRouteWeight(weight int) int {
+	if weight <= 0 {
+		return 1
+	}
+	return min(weight, 1000)
 }
 
 // redisRouteCursor 在启用 Redis 时使用原子自增游标，使多实例共享同一轮询顺序。

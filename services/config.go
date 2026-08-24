@@ -98,6 +98,17 @@ const (
 )
 
 const (
+	gatewayStrategyOrdered         = "ordered"
+	gatewayStrategyAdaptive        = "round_robin" // 兼容旧版管理端：round_robin 一直表示自适应均衡。
+	gatewayStrategyRoundRobin      = "equal_round_robin"
+	gatewayStrategyWeighted        = "weighted"
+	gatewayStrategyQuotaFirst      = "quota_first"
+	gatewayStrategyLeastRecentUsed = "least_recently_used"
+	gatewayStrategySessionAffinity = "session_affinity"
+	gatewayStrategyQuotaAdaptive   = "quota_adaptive"
+)
+
+const (
 	defaultContextCompactionThreshold = int64(100000)
 	minContextCompactionThreshold     = int64(80000)
 	maxContextCompactionThreshold     = int64(120000)
@@ -119,7 +130,7 @@ func Config() GatewayConfig {
 		RequestTimeoutSeconds:      int64Default(cast.ToInt64(m["request-timeout-seconds"]), 120),
 		StreamIdleTimeoutSeconds:   int64Default(cast.ToInt64(m["stream-idle-timeout-seconds"]), 60),
 		MaxRetries:                 intDefault(cast.ToInt(m["max-retries"]), 1),
-		RoutingStrategy:            stringDefault(cast.ToString(m["routing-strategy"]), "weighted_round_robin"),
+		RoutingStrategy:            stringDefault(cast.ToString(m["routing-strategy"]), routingStrategyAdaptiveWeighted),
 		QuotaRefreshSeconds:        int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 180),
 		CooldownSeconds:            int64Default(cast.ToInt64(m["cooldown-seconds"]), 300),
 		CleanupLogRetentionDays:    intDefault(cast.ToInt(m["cleanup-log-retention-days"]), 30),
@@ -254,6 +265,7 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 }
 
 func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfigInput, error) {
+	input.AccountSelectionStrategy = gatewayAccountSelectionStrategy(routingStrategyFromGateway(input.AccountSelectionStrategy))
 	input.UpstreamProxyURL = strings.TrimSpace(input.UpstreamProxyURL)
 	if input.ContextCompactionThreshold == 0 {
 		input.ContextCompactionThreshold = defaultContextCompactionThreshold
@@ -303,7 +315,7 @@ func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayC
 		remark string
 	}{
 		{systemConfigGatewayListenAddress, normalizeListenAddress(input.ListenAddress), "网关监听地址"},
-		{systemConfigGatewayAccountSelection, stringDefault(strings.TrimSpace(input.AccountSelectionStrategy), "ordered"), "账号选择策略"},
+		{systemConfigGatewayAccountSelection, stringDefault(strings.TrimSpace(input.AccountSelectionStrategy), gatewayStrategyOrdered), "账号选择策略"},
 		{systemConfigRoutingStrategy, routingStrategyFromGateway(input.AccountSelectionStrategy), "账号池路由策略"},
 		{systemConfigGatewayOriginator, stringDefault(strings.TrimSpace(input.Originator), "codex_cli_rs"), "上游 Originator"},
 		{systemConfigGatewayResidency, strings.TrimSpace(input.Residency), "区域驻留要求"},
@@ -405,17 +417,45 @@ func intPtr(value int) *int       { return &value }
 func int64Ptr(value int64) *int64 { return &value }
 
 func gatewayAccountSelectionStrategy(value string) string {
-	if strings.TrimSpace(value) == "round_robin" || strings.TrimSpace(value) == "weighted_round_robin" {
-		return "round_robin"
+	switch strings.TrimSpace(value) {
+	case routingStrategyAdaptiveWeighted:
+		return gatewayStrategyAdaptive
+	case routingStrategyRoundRobin:
+		return gatewayStrategyRoundRobin
+	case routingStrategyStaticWeightedRoundRobin:
+		return gatewayStrategyWeighted
+	case routingStrategyMostQuotaRemaining:
+		return gatewayStrategyQuotaFirst
+	case routingStrategyLeastRecentlyUsed:
+		return gatewayStrategyLeastRecentUsed
+	case routingStrategySessionAffinity:
+		return gatewayStrategySessionAffinity
+	case routingStrategyQuotaAwareAdaptive:
+		return gatewayStrategyQuotaAdaptive
+	default:
+		return gatewayStrategyOrdered
 	}
-	return "ordered"
 }
 
 func routingStrategyFromGateway(value string) string {
-	if strings.TrimSpace(value) == "round_robin" {
-		return "weighted_round_robin"
+	switch strings.TrimSpace(value) {
+	case gatewayStrategyAdaptive, "adaptive", routingStrategyAdaptiveWeighted:
+		return routingStrategyAdaptiveWeighted
+	case gatewayStrategyRoundRobin:
+		return routingStrategyRoundRobin
+	case gatewayStrategyWeighted, routingStrategyStaticWeightedRoundRobin:
+		return routingStrategyStaticWeightedRoundRobin
+	case gatewayStrategyQuotaFirst, routingStrategyMostQuotaRemaining:
+		return routingStrategyMostQuotaRemaining
+	case gatewayStrategyLeastRecentUsed:
+		return routingStrategyLeastRecentlyUsed
+	case gatewayStrategySessionAffinity:
+		return routingStrategySessionAffinity
+	case gatewayStrategyQuotaAdaptive, routingStrategyQuotaAwareAdaptive:
+		return routingStrategyQuotaAwareAdaptive
+	default:
+		return routingStrategyPriorityFirst
 	}
-	return "priority_first"
 }
 
 func normalizeListenAddress(value string) string {

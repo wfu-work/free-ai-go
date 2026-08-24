@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +24,10 @@ var accountResetCreditLocks sync.Map
 
 // AccountResetCreditSummary 是管理端可安全展示的重置券汇总。
 type AccountResetCreditSummary struct {
-	AvailableCount           int  `json:"availableCount"`
-	ApplicableAvailableCount *int `json:"applicableAvailableCount,omitempty"`
+	AvailableCount           int   `json:"availableCount"`
+	ApplicableAvailableCount *int  `json:"applicableAvailableCount,omitempty"`
+	ExpiresAt                int64 `json:"expiresAt,omitempty"`
+	SyncedAt                 int64 `json:"syncedAt,omitempty"`
 }
 
 // AccountResetCredit 是一张官方额度重置券；官方时间戳统一转换为毫秒。
@@ -43,6 +47,7 @@ type AccountResetCreditsResult struct {
 	ApplicableAvailableCount *int                 `json:"applicableAvailableCount,omitempty"`
 	Credits                  []AccountResetCredit `json:"credits"`
 	DetailsAvailable         bool                 `json:"detailsAvailable"`
+	ExpiresAt                int64                `json:"expiresAt,omitempty"`
 	SyncedAt                 int64                `json:"syncedAt"`
 }
 
@@ -52,17 +57,25 @@ type ConsumeAccountResetCreditInput struct {
 }
 
 type ConsumeAccountResetCreditResult struct {
-	AccountGuid    string                    `json:"accountGuid"`
-	Outcome        string                    `json:"outcome"`
-	CreditID       string                    `json:"creditId,omitempty"`
-	IdempotencyKey string                    `json:"idempotencyKey"`
-	ResetCredits   AccountResetCreditsResult `json:"resetCredits"`
-	Usage          *RefreshUsageResult       `json:"usage,omitempty"`
-	RefreshWarning string                    `json:"refreshWarning,omitempty"`
+	AccountGuid    string                     `json:"accountGuid"`
+	Outcome        string                     `json:"outcome"`
+	CreditID       string                     `json:"creditId,omitempty"`
+	IdempotencyKey string                     `json:"idempotencyKey"`
+	ResetCredits   *AccountResetCreditsResult `json:"resetCredits,omitempty"`
+	Usage          *RefreshUsageResult        `json:"usage,omitempty"`
+	RefreshWarning string                     `json:"refreshWarning,omitempty"`
 }
 
 func (s AccountResetCreditService) List(ctx context.Context, guid string) (AccountResetCreditsResult, error) {
-	account, err := AccountServiceApp.GetByGuid(strings.TrimSpace(guid))
+	guid = strings.TrimSpace(guid)
+	lock := accountResetCreditLock(guid)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.listUnlocked(ctx, guid)
+}
+
+func (s AccountResetCreditService) listUnlocked(ctx context.Context, guid string) (AccountResetCreditsResult, error) {
+	account, err := AccountServiceApp.GetByGuid(guid)
 	if err != nil {
 		return AccountResetCreditsResult{}, err
 	}
@@ -80,7 +93,14 @@ func (s AccountResetCreditService) List(ctx context.Context, guid string) (Accou
 			result, err = s.listWithFile(ctx, account, file)
 		}
 	}
-	return result, err
+	if err != nil {
+		return AccountResetCreditsResult{}, err
+	}
+	result = normalizeResetCreditResult(result)
+	if err = s.persistSnapshot(result); err != nil {
+		return AccountResetCreditsResult{}, fmt.Errorf("persist reset credit snapshot: %w", err)
+	}
+	return result, nil
 }
 
 func (s AccountResetCreditService) Consume(ctx context.Context, guid string, input ConsumeAccountResetCreditInput) (ConsumeAccountResetCreditResult, error) {
@@ -90,12 +110,12 @@ func (s AccountResetCreditService) Consume(ctx context.Context, guid string, inp
 		return ConsumeAccountResetCreditResult{}, errors.New("idempotencyKey must be a valid UUID")
 	}
 
-	lockValue, _ := accountResetCreditLocks.LoadOrStore(guid, &sync.Mutex{})
-	lock := lockValue.(*sync.Mutex)
+	guid = strings.TrimSpace(guid)
+	lock := accountResetCreditLock(guid)
 	lock.Lock()
 	defer lock.Unlock()
 
-	account, err := AccountServiceApp.GetByGuid(strings.TrimSpace(guid))
+	account, err := AccountServiceApp.GetByGuid(guid)
 	if err != nil {
 		return ConsumeAccountResetCreditResult{}, err
 	}
@@ -111,8 +131,17 @@ func (s AccountResetCreditService) Consume(ctx context.Context, guid string, inp
 			AccountGuid: account.Guid, Outcome: redemption.Outcome,
 			CreditID: redemption.CreditID, IdempotencyKey: redemption.IdempotencyKey,
 		}
-		if credits, listErr := s.List(ctx, account.Guid); listErr == nil {
-			result.ResetCredits = credits
+		if cached, found, cacheErr := s.persistedSnapshot(account.Guid); cacheErr == nil && found {
+			result.ResetCredits = &cached
+		} else if cacheErr != nil {
+			result.RefreshWarning = appendResetCreditWarning(result.RefreshWarning, cacheErr)
+		}
+		if result.ResetCredits == nil {
+			if credits, listErr := s.listUnlocked(ctx, account.Guid); listErr == nil {
+				result.ResetCredits = &credits
+			} else {
+				result.RefreshWarning = appendResetCreditWarning(result.RefreshWarning, listErr)
+			}
 		}
 		return result, nil
 	}
@@ -149,20 +178,27 @@ func (s AccountResetCreditService) Consume(ctx context.Context, guid string, inp
 		AccountGuid: account.Guid, Outcome: string(outcome),
 		CreditID: resolvedCreditID, IdempotencyKey: input.IdempotencyKey,
 	}
+	if cached, cacheErr := s.applyConsumeOutcome(account.Guid, resolvedCreditID, outcome); cacheErr == nil {
+		result.ResetCredits = cached
+	} else {
+		result.RefreshWarning = appendResetCreditWarning(result.RefreshWarning, cacheErr)
+	}
 	if outcome.IsIdempotentSuccess() {
 		usage, refreshErr := AccountServiceApp.RefreshUsage(account.Guid)
 		if refreshErr == nil {
 			result.Usage = &usage
 		} else {
-			result.RefreshWarning = truncateError(refreshErr)
+			result.RefreshWarning = appendResetCreditWarning(result.RefreshWarning, refreshErr)
 		}
 	}
-	if outcome.IsKnown() {
-		credits, listErr := s.List(ctx, account.Guid)
+	// 消耗接口的结果比紧随其后的列表查询更可靠。官方列表可能存在短暂缓存，
+	// 只有本地没有可更新的快照时才回查，避免成功扣减后数量立即回跳。
+	if outcome.IsKnown() && result.ResetCredits == nil {
+		credits, listErr := s.listUnlocked(ctx, account.Guid)
 		if listErr == nil {
-			result.ResetCredits = credits
-		} else if result.RefreshWarning == "" {
-			result.RefreshWarning = truncateError(listErr)
+			result.ResetCredits = &credits
+		} else {
+			result.RefreshWarning = appendResetCreditWarning(result.RefreshWarning, listErr)
 		}
 	}
 	AuditServiceApp.Record("", "account.reset_credit.consume", "account", account.Guid, map[string]any{
@@ -234,6 +270,195 @@ func (s AccountResetCreditService) consumeWithFile(ctx context.Context, account 
 	return client.Resets.Consume(ctx, accountRouteID(account, file), input.IdempotencyKey, input.CreditID)
 }
 
+func accountResetCreditLock(guid string) *sync.Mutex {
+	value, _ := accountResetCreditLocks.LoadOrStore(guid, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func normalizeResetCreditResult(result AccountResetCreditsResult) AccountResetCreditsResult {
+	if result.AvailableCount < 0 {
+		result.AvailableCount = 0
+	}
+	if result.ApplicableAvailableCount != nil {
+		value := max(0, *result.ApplicableAvailableCount)
+		result.ApplicableAvailableCount = &value
+	}
+	credits := make([]AccountResetCredit, 0, len(result.Credits))
+	for _, credit := range result.Credits {
+		credit.ID = strings.TrimSpace(credit.ID)
+		credit.ResetType = strings.TrimSpace(credit.ResetType)
+		credit.Status = strings.TrimSpace(credit.Status)
+		credit.Title = strings.TrimSpace(credit.Title)
+		credit.Description = strings.TrimSpace(credit.Description)
+		credits = append(credits, credit)
+	}
+	if result.DetailsAvailable {
+		result.Credits = credits
+	} else {
+		result.Credits = nil
+	}
+	result.ExpiresAt = earliestResetCreditExpiry(result.Credits)
+	if result.SyncedAt <= 0 {
+		result.SyncedAt = time.Now().UnixMilli()
+	}
+	return result
+}
+
+func earliestResetCreditExpiry(credits []AccountResetCredit) int64 {
+	var expiresAt int64
+	for _, credit := range credits {
+		if !resetCreditIsAvailable(credit) || credit.ExpiresAt <= 0 {
+			continue
+		}
+		if expiresAt == 0 || credit.ExpiresAt < expiresAt {
+			expiresAt = credit.ExpiresAt
+		}
+	}
+	return expiresAt
+}
+
+func resetCreditIsAvailable(credit AccountResetCredit) bool {
+	return credit.Status == "" || strings.EqualFold(credit.Status, "available")
+}
+
+func (s AccountResetCreditService) persistSnapshot(result AccountResetCreditsResult) error {
+	result = normalizeResetCreditResult(result)
+	creditsJSON, err := json.Marshal(result.Credits)
+	if err != nil {
+		return err
+	}
+	var snapshot domains.AccountResetCreditSnapshot
+	err = global.NAV_DB.Where("account_guid = ?", result.AccountGuid).First(&snapshot).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return global.NAV_DB.Create(&domains.AccountResetCreditSnapshot{
+			AccountGuid: result.AccountGuid, AvailableCount: result.AvailableCount,
+			ApplicableAvailableCount: result.ApplicableAvailableCount,
+			DetailsAvailable:         result.DetailsAvailable, CreditsJSON: string(creditsJSON),
+			ExpiresAt: result.ExpiresAt, SyncedAt: result.SyncedAt,
+		}).Error
+	}
+	if err != nil {
+		return err
+	}
+	return global.NAV_DB.Model(&snapshot).Updates(map[string]any{
+		"available_count": result.AvailableCount, "applicable_available_count": result.ApplicableAvailableCount,
+		"details_available": result.DetailsAvailable, "credits_json": string(creditsJSON),
+		"expires_at": result.ExpiresAt, "synced_at": result.SyncedAt,
+	}).Error
+}
+
+func (s AccountResetCreditService) persistedSnapshot(accountGuid string) (AccountResetCreditsResult, bool, error) {
+	var snapshot domains.AccountResetCreditSnapshot
+	err := global.NAV_DB.Where("account_guid = ?", accountGuid).First(&snapshot).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return AccountResetCreditsResult{}, false, nil
+	}
+	if err != nil {
+		return AccountResetCreditsResult{}, false, err
+	}
+	return resetCreditResultFromSnapshot(snapshot), true, nil
+}
+
+func resetCreditSnapshotsByAccount(accountGuids []string) (map[string]AccountResetCreditsResult, error) {
+	results := make(map[string]AccountResetCreditsResult, len(accountGuids))
+	if len(accountGuids) == 0 {
+		return results, nil
+	}
+	var snapshots []domains.AccountResetCreditSnapshot
+	if err := global.NAV_DB.Where("account_guid IN ?", accountGuids).Find(&snapshots).Error; err != nil {
+		return nil, err
+	}
+	for _, snapshot := range snapshots {
+		results[snapshot.AccountGuid] = resetCreditResultFromSnapshot(snapshot)
+	}
+	return results, nil
+}
+
+func resetCreditResultFromSnapshot(snapshot domains.AccountResetCreditSnapshot) AccountResetCreditsResult {
+	var credits []AccountResetCredit
+	if strings.TrimSpace(snapshot.CreditsJSON) != "" {
+		_ = json.Unmarshal([]byte(snapshot.CreditsJSON), &credits)
+	}
+	return normalizeResetCreditResult(AccountResetCreditsResult{
+		AccountGuid: snapshot.AccountGuid, AvailableCount: snapshot.AvailableCount,
+		ApplicableAvailableCount: snapshot.ApplicableAvailableCount,
+		Credits:                  credits, DetailsAvailable: snapshot.DetailsAvailable,
+		ExpiresAt: snapshot.ExpiresAt, SyncedAt: snapshot.SyncedAt,
+	})
+}
+
+func (s AccountResetCreditService) applyConsumeOutcome(accountGuid, creditID string, outcome chatgpt.RateLimitResetOutcome) (*AccountResetCreditsResult, error) {
+	result, found, err := s.persistedSnapshot(accountGuid)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		if outcome != chatgpt.RateLimitResetOutcomeNoCredit {
+			return nil, nil
+		}
+		result = AccountResetCreditsResult{AccountGuid: accountGuid, DetailsAvailable: false}
+	}
+	switch outcome {
+	case chatgpt.RateLimitResetOutcomeReset, chatgpt.RateLimitResetOutcomeAlreadyRedeemed:
+		result.AvailableCount = max(0, result.AvailableCount-1)
+		if result.ApplicableAvailableCount != nil {
+			value := max(0, *result.ApplicableAvailableCount-1)
+			result.ApplicableAvailableCount = &value
+		}
+		result.Credits = removeConsumedResetCredit(result.Credits, creditID)
+	case chatgpt.RateLimitResetOutcomeNoCredit:
+		zero := 0
+		result.AvailableCount = 0
+		result.ApplicableAvailableCount = &zero
+		if result.DetailsAvailable {
+			result.Credits = []AccountResetCredit{}
+		}
+	case chatgpt.RateLimitResetOutcomeNothingToReset:
+		zero := 0
+		result.ApplicableAvailableCount = &zero
+	default:
+		return &result, nil
+	}
+	result.SyncedAt = time.Now().UnixMilli()
+	result = normalizeResetCreditResult(result)
+	if err = s.persistSnapshot(result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func removeConsumedResetCredit(credits []AccountResetCredit, creditID string) []AccountResetCredit {
+	index := -1
+	creditID = strings.TrimSpace(creditID)
+	for current, credit := range credits {
+		if creditID != "" && credit.ID == creditID {
+			index = current
+			break
+		}
+		if index < 0 && resetCreditIsAvailable(credit) {
+			index = current
+		}
+	}
+	if index < 0 {
+		return credits
+	}
+	return append(credits[:index:index], credits[index+1:]...)
+}
+
+func appendResetCreditWarning(current string, err error) string {
+	if err == nil {
+		return current
+	}
+	message := truncateError(err)
+	if current == "" {
+		return message
+	}
+	if strings.Contains(current, message) {
+		return current
+	}
+	return truncateError(errors.New(current + "; " + message))
+}
+
 func resetCreditSummaryFromUsage(raw []byte) (AccountResetCreditSummary, bool) {
 	usage, err := chatgpt.ParseUsageSnapshot(raw)
 	if err != nil {
@@ -246,9 +471,14 @@ func resetCreditSummaryFromSnapshot(credits *chatgpt.RateLimitResetCredits) (Acc
 	if credits == nil {
 		return AccountResetCreditSummary{}, false
 	}
+	expiresAt := int64(0)
+	if credit := credits.NextAvailableCredit(); credit != nil {
+		expiresAt = credit.ExpiresAtMillis()
+	}
 	return AccountResetCreditSummary{
 		AvailableCount:           credits.AvailableCount,
 		ApplicableAvailableCount: credits.ApplicableAvailableCount,
+		ExpiresAt:                expiresAt,
 	}, true
 }
 

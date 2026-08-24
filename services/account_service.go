@@ -111,7 +111,7 @@ type AccountListItem struct {
 	domains.Account
 	Quotas              []domains.AccountQuota     `json:"quotas"`
 	AvailableModelCount int64                      `json:"availableModelCount"`
-	ResetCredits        *AccountResetCreditSummary `json:"resetCredits,omitempty"`
+	ResetCredits        *AccountResetCreditsResult `json:"resetCredits,omitempty"`
 	GatewayUsage        AccountGatewayUsage        `json:"gatewayUsage"`
 }
 
@@ -577,14 +577,28 @@ func attachAccountQuotas(accounts []domains.Account) ([]AccountListItem, error) 
 	if err != nil {
 		return nil, err
 	}
+	resetCreditsByAccount, err := resetCreditSnapshotsByAccount(guids)
+	if err != nil {
+		return nil, err
+	}
 	for _, account := range accounts {
 		usage, ok := usageByAccount[account.Guid]
 		if !ok {
 			usage = AccountGatewayUsage{Since: since, Until: until, CostAvailable: true}
 		}
+		var resetCredits *AccountResetCreditsResult
+		if snapshot, exists := resetCreditsByAccount[account.Guid]; exists {
+			resetCredits = &snapshot
+		} else if summary := resetCreditSummaryFromQuotas(byAccount[account.Guid]); summary != nil {
+			resetCredits = &AccountResetCreditsResult{
+				AccountGuid: account.Guid, AvailableCount: summary.AvailableCount,
+				ApplicableAvailableCount: summary.ApplicableAvailableCount,
+				ExpiresAt:                summary.ExpiresAt,
+			}
+		}
 		items = append(items, AccountListItem{
 			Account: account, Quotas: byAccount[account.Guid], AvailableModelCount: countByAccount[account.Guid],
-			ResetCredits: resetCreditSummaryFromQuotas(byAccount[account.Guid]), GatewayUsage: usage,
+			ResetCredits: resetCredits, GatewayUsage: usage,
 		})
 	}
 	return items, nil
@@ -641,6 +655,9 @@ func (s AccountService) DeleteByGuid(guid string) error {
 	account, _ := s.GetByGuid(guid)
 	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountQuota{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountResetCreditSnapshot{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("account_guid = ?", guid).Delete(&domains.AccountResetCreditRedemption{}).Error; err != nil {

@@ -13,6 +13,7 @@ func RegisterTables() {
 		Account{},
 		AccountGroup{},
 		AccountQuota{},
+		AccountResetCreditSnapshot{},
 		AccountResetCreditRedemption{},
 		ModelCatalog{},
 		AccountModelAvailability{},

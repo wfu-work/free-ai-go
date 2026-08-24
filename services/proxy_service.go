@@ -147,13 +147,14 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		maxAttempts = 1
 	}
 	excluded := map[string]bool{}
+	affinityKey := requestRouteAffinityKey(r, body, platformKey)
 	switchReasons := make([]string, 0, maxAttempts)
 	var lastOutput ProxyOutput
 	var lastErr error
 	var lastResult *ProxyResult
 	var lastSelection RouteSelection
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		selection, err := RouterServiceApp.SelectForKey(modelName, excluded, platformKey)
+		selection, err := RouterServiceApp.SelectForKeyWithAffinity(modelName, excluded, platformKey, affinityKey)
 		if err != nil {
 			if lastSelection.Account.Guid != "" {
 				break

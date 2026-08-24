@@ -34,6 +34,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		router.GET("list", accountApi.List)
 		router.GET("list/all", accountApi.ListAll)
 		router.GET(":guid", accountApi.GetByGuid)
+		router.GET(":guid/usage", accountApi.Usage)
 		router.GET(":guid/reset-credits", accountApi.ResetCredits)
 		router.GET(":guid/export", accountApi.Export)
 	}

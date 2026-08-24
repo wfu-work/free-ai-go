@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/cast"
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	"github.com/wfu-work/nav-common-go-lib/response"
@@ -233,6 +235,46 @@ func (a AccountApi) GetByGuid(c *gin.Context) {
 		return
 	}
 	response.Ok(account, c)
+}
+
+// Usage 获取指定账号经过本网关产生的 Token 与请求用量。
+// @Summary 获取账号本地用量
+// @Description 按时间范围统计指定账号经过本网关的请求数、Token、参考成本和趋势
+// @Tags 账号模块
+// @Security ApiKeyAuth
+// @Produce json
+// @Param guid path string true "账号guid"
+// @Param days query int false "统计天数，默认 90 天"
+// @Success 200 {object} response.Response{data=services.UsageSummary,msg=string}
+// @Router /accounts/{guid}/usage [get]
+func (a AccountApi) Usage(c *gin.Context) {
+	guid := strings.TrimSpace(c.Param("guid"))
+	if _, err := accountService.GetByGuid(guid); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+
+	days := cast.ToInt(c.Query("days"))
+	if days <= 0 {
+		days = 90
+	}
+	if days > 365 {
+		days = 365
+	}
+	now := time.Now()
+	until := now.UnixMilli()
+	since := now.Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	result, err := services.RequestLogServiceApp.AccountUsageSummaryWithGranularity(
+		guid,
+		since,
+		until,
+		services.UsageTimelineGranularityDay,
+	)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
 }
 
 // DeleteByGuid 删除账号

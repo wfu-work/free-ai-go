@@ -48,6 +48,13 @@ var adaptiveRouteMetrics = newAdaptiveRouteMetricStore()
 // on the selected account before returning. This makes concurrent selections
 // observe one another instead of stampeding the same currently-fast account.
 func (s *adaptiveRouteMetricStore) pickAndAcquire(accounts []domains.Account, cursor int, now time.Time) domains.Account {
+	return s.pickAndAcquireWithQuota(accounts, cursor, now, nil)
+}
+
+// pickAndAcquireWithQuota extends adaptive routing with optional per-account
+// quota factors. Missing quota data remains neutral so a failed quota refresh
+// never prevents the gateway from selecting an otherwise available account.
+func (s *adaptiveRouteMetricStore) pickAndAcquireWithQuota(accounts []domains.Account, cursor int, now time.Time, quotaFactors map[string]float64) domains.Account {
 	if len(accounts) == 0 {
 		return domains.Account{}
 	}
@@ -55,7 +62,7 @@ func (s *adaptiveRouteMetricStore) pickAndAcquire(accounts []domains.Account, cu
 	defer s.Unlock()
 
 	snapshots := s.snapshotsLocked(accounts, now)
-	weights := adaptiveRouteWeights(accounts, snapshots)
+	weights := adaptiveRouteWeightsWithQuota(accounts, snapshots, quotaFactors)
 	total := 0
 	for _, weight := range weights {
 		total += weight
@@ -153,6 +160,10 @@ func (s *adaptiveRouteMetricStore) metricLocked(accountGuid string) *accountRout
 // current concurrency. A minimum exploration weight lets recovered accounts
 // re-enter traffic instead of being permanently starved.
 func adaptiveRouteWeights(accounts []domains.Account, snapshots map[string]accountRouteMetricSnapshot) []int {
+	return adaptiveRouteWeightsWithQuota(accounts, snapshots, nil)
+}
+
+func adaptiveRouteWeightsWithQuota(accounts []domains.Account, snapshots map[string]accountRouteMetricSnapshot, quotaFactors map[string]float64) []int {
 	baselineLatency := adaptiveLatencyBaseline(accounts, snapshots)
 	weights := make([]int, len(accounts))
 	for i, account := range accounts {
@@ -172,7 +183,11 @@ func adaptiveRouteWeights(accounts []domains.Account, snapshots map[string]accou
 		overloadRate := math.Max(0, math.Min(1, snapshot.OverloadRate))
 		overloadFactor := math.Max(0.1, 1-0.9*overloadRate)
 		concurrencyFactor := 1 / float64(1+max(snapshot.InFlight, 0))
-		effective := float64(baseWeight) * latencyFactor * overloadFactor * concurrencyFactor
+		quotaFactor := quotaFactors[account.Guid]
+		if quotaFactor <= 0 || math.IsNaN(quotaFactor) || math.IsInf(quotaFactor, 0) {
+			quotaFactor = 1
+		}
+		effective := float64(baseWeight) * latencyFactor * overloadFactor * concurrencyFactor * quotaFactor
 		weights[i] = max(1, int(math.Round(effective*100)))
 	}
 	return weights

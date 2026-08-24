@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -316,15 +317,24 @@ type usageTotalsRow struct {
 
 // UsageSummary 按模型、账号和 API 密钥统计请求用量，避免前端拉取大量日志后重复聚合。
 func (s RequestLogService) UsageSummary(since, until int64) (UsageSummary, error) {
-	return s.usageSummary(since, until, UsageTimelineGranularityAuto)
+	return s.usageSummary(since, until, UsageTimelineGranularityAuto, "")
 }
 
 // UsageSummaryWithGranularity 按指定时间粒度生成用量趋势。
 func (s RequestLogService) UsageSummaryWithGranularity(since, until int64, granularity UsageTimelineGranularity) (UsageSummary, error) {
-	return s.usageSummary(since, until, granularity)
+	return s.usageSummary(since, until, granularity, "")
 }
 
-func (s RequestLogService) usageSummary(since, until int64, granularity UsageTimelineGranularity) (UsageSummary, error) {
+// AccountUsageSummaryWithGranularity 只统计指定账号经过本网关产生的请求用量。
+func (s RequestLogService) AccountUsageSummaryWithGranularity(accountGuid string, since, until int64, granularity UsageTimelineGranularity) (UsageSummary, error) {
+	accountGuid = strings.TrimSpace(accountGuid)
+	if accountGuid == "" {
+		return UsageSummary{}, errors.New("account guid is required")
+	}
+	return s.usageSummary(since, until, granularity, accountGuid)
+}
+
+func (s RequestLogService) usageSummary(since, until int64, granularity UsageTimelineGranularity, accountGuid string) (UsageSummary, error) {
 	if until <= 0 {
 		until = time.Now().UnixMilli()
 	}
@@ -334,8 +344,12 @@ func (s RequestLogService) usageSummary(since, until int64, granularity UsageTim
 	// 每个聚合步骤都必须使用独立查询。GORM 的 Select、Group、Order 会保存在
 	// 当前 Statement 中；复用同一个查询会把维度统计的 requests 排序带入趋势查询。
 	newUsageQuery := func() *gorm.DB {
-		return global.NAV_DB.Model(&domains.RequestLog{}).
+		db := global.NAV_DB.Model(&domains.RequestLog{}).
 			Where("created_at_unix >= ? AND created_at_unix <= ?", since, until)
+		if accountGuid != "" {
+			db = db.Where("account_guid = ?", accountGuid)
+		}
+		return db
 	}
 	var totals usageTotalsRow
 	if err := newUsageQuery().Select(`

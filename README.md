@@ -118,6 +118,7 @@ ChatGPT Pro 订阅不包含 OpenAI Platform API 额度。图片请求按 Platfor
 | `GET` | `/api/accounts/list` | 分页查询账号及额度窗口 |
 | `GET` | `/api/accounts/list/all` | 查询全部账号 |
 | `GET` | `/api/accounts/:guid` | 查询账号详情 |
+| `GET` | `/api/accounts/:guid/usage` | 查询账号经过本网关的 Token、请求和趋势用量 |
 | `PUT` | `/api/accounts/:guid` | 更新账号组、模型与调度参数 |
 | `DELETE` | `/api/accounts/:guid` | 删除账号及其额度快照 |
 | `GET` | `/api/accounts/:guid/export` | 导出含令牌的规范账号文件 |
@@ -183,7 +184,9 @@ freeai:
   context-compaction-enabled: true
   context-compaction-threshold-tokens: 100000
   max-retries: 1
-  # weighted_round_robin 会以账号权重为容量基线，并结合近期首响、过载率和当前并发动态分流
+  # 可选 priority_first、weighted_round_robin（自适应）、round_robin、
+  # static_weighted_round_robin、most_quota_remaining、least_recently_used、
+  # session_affinity（会话亲和）、quota_aware_adaptive（配额感知自适应）
   routing-strategy: weighted_round_robin
   quota-refresh-seconds: 180
   cooldown-seconds: 300
@@ -195,6 +198,10 @@ freeai:
   quota-default-reserve-tokens: 8192
   quota-reservation-ttl-seconds: 1800
 ```
+
+`session_affinity` 会优先读取请求头 `X-FreeAI-Affinity-Key`，也支持请求体中的
+`conversation`、`conversation_id`、`session_id`、`prompt_cache_key`、`metadata`
+会话字段；未提供时回退到平台密钥。会话标识仅在请求内生成不可逆摘要，不会持久化。
 
 单实例可以保持 `system.use-redis: false`。多实例部署应启用 Redis，使平台密钥 RPM 限流和账号轮询游标在实例之间保持一致。
 
