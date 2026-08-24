@@ -214,8 +214,8 @@ github.com/unrolled/secure v1.17.0 h1:Io7ifFgo99Bnh0J7+Q+qcMzWM6kaDPCA5FroFZEdbW
 github.com/unrolled/secure v1.17.0/go.mod h1:BmF5hyM6tXczk3MpQkFf1hpKSRqCyhqcbiQtiAF7+40=
 github.com/wfu-work/nav-common-go-lib v0.0.0-20260721155653-38ed4a403c2b h1:dnKyNwG1XAB1/ZKbXNzoGWE5ySCU67FBYcdfkgpF+Us=
 github.com/wfu-work/nav-common-go-lib v0.0.0-20260721155653-38ed4a403c2b/go.mod h1:Yfqgjsfp0JsJl8Nk2QZ+zdo37tv5xqOq+ZAI6ZYNpcM=
-github.com/wfu-work/proxy-api-lib v0.0.0-20260812140950-1b104d144d23 h1:yaryM0lhLjL+3nbUWBbXhI4RdHU2YvXIB9lZxLUV/JM=
-github.com/wfu-work/proxy-api-lib v0.0.0-20260812140950-1b104d144d23/go.mod h1:ex7XPbzc9XXrM0cxD82a08HfTqqNFQnO0y78SrWH7i4=
+github.com/wfu-work/proxy-api-lib v0.0.0-20260824011707-4b856fc934d0 h1:WmpCR6Y+OTPNgi+rdS2cYp5O7ADdsev/eEIFuB75/L4=
+github.com/wfu-work/proxy-api-lib v0.0.0-20260824011707-4b856fc934d0/go.mod h1:ex7XPbzc9XXrM0cxD82a08HfTqqNFQnO0y78SrWH7i4=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=

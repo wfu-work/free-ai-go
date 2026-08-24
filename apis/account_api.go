@@ -14,8 +14,11 @@ import (
 
 type AccountApi struct{}
 
+const maxAccountImportRequestBytes = (16 << 20) + (64 << 10)
+
 // Import 导入 Codex OAuth 账号文件。
 func (a AccountApi) Import(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAccountImportRequestBytes)
 	var input services.ImportAccountInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		response.FailWithMessage(err.Error(), c)
@@ -28,6 +31,22 @@ func (a AccountApi) Import(c *gin.Context) {
 	}
 	response.Ok(account, c)
 	accountService.SyncOfficialAccountAsync(account.Guid)
+}
+
+// ImportFile 自动识别并导入 FreeAI 原生或 sub2api-data v1 账号文件。
+func (a AccountApi) ImportFile(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAccountImportRequestBytes)
+	var input services.ImportAccountInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	result, err := accountService.ImportFile(input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
 }
 
 // AddManual 使用手动填写的 OAuth Token 添加官方账号。

@@ -14,6 +14,7 @@ func (r ModelRouter) InitModelRouter(group *gin.RouterGroup) {
 		routerLogger.POST("sync", modelApi.Sync)
 		routerLogger.POST("pricing/sync", modelApi.SyncPricing)
 		routerLogger.PUT(":guid", modelApi.Update)
+		routerLogger.DELETE(":guid", modelApi.DeleteByGuid)
 		routerLogger.POST(":guid/enable", modelApi.Enable)
 		routerLogger.POST(":guid/disable", modelApi.Disable)
 	}

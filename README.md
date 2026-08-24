@@ -29,7 +29,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 
 ## 能力
 
-- 导入、更新和敏感导出规范 OAuth 账号文件。
+- 导入、更新和敏感导出规范 OAuth 账号文件，并支持 sub2api-data v1 批量导入。
 - 使用主密钥对完整账号文件进行 AES-GCM 加密。
 - 验证并加密保存 OpenAI Platform API Key，只同步该项目实际可见的图片模型。
 - Access Token 到期前自动刷新；Refresh Token 轮换后原子持久化。
@@ -50,7 +50,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 
 ## OAuth 账号文件
 
-导入接口只接受下列规范结构。示例值均为占位符：
+原有 `/api/accounts/import` 接口接受下列规范结构。`/api/accounts/import-file` 还可自动识别包含 `accounts[]` 的 sub2api-data v1 文件。示例值均为占位符：
 
 ```json
 {
@@ -71,7 +71,7 @@ ChatGPT 内部接口不是公开稳定的 OpenAI Platform API。具体协议集�
 }
 ```
 
-相同 `account_id` 再次导入会更新原账号的加密凭据，不会创建重复账号。旧 API Key、裸 Token 或旧认证字段不会被猜测转换；迁移时没有规范 `encrypted_account_file` 的旧账号会被禁用。
+相同 `account_id` 再次导入会更新原账号的加密凭据，不会创建重复账号。除明确支持的 sub2api-data v1 外，旧 API Key、裸 Token 或旧认证字段不会被猜测转换；迁移时没有规范 `encrypted_account_file` 的旧账号会被禁用。
 
 ## 图片 API 账号
 
@@ -113,6 +113,7 @@ ChatGPT Pro 订阅不包含 OpenAI Platform API 额度。图片请求按 Platfor
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `POST` | `/api/accounts/import` | 导入或更新 OAuth 账号文件 |
+| `POST` | `/api/accounts/import-file` | 自动识别并导入规范 OAuth 或 sub2api-data v1 文件 |
 | `POST` | `/api/accounts/api-key` | 验证并添加独立 OpenAI 图片 API Key |
 | `GET` | `/api/accounts/list` | 分页查询账号及额度窗口 |
 | `GET` | `/api/accounts/list/all` | 查询全部账号 |

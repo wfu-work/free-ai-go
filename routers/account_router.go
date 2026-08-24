@@ -26,6 +26,7 @@ func (r AccountRouter) InitAccountRouter(group *gin.RouterGroup) {
 		router.POST("", accountApi.AddManual)
 		router.POST("api-key", accountApi.AddAPIKey)
 		router.POST("import", accountApi.Import)
+		router.POST("import-file", accountApi.ImportFile)
 		router.POST("oauth/sessions", accountApi.StartOAuth)
 		router.GET("oauth/sessions/:id", accountApi.GetOAuth)
 		router.POST("oauth/sessions/:id/complete", accountApi.CompleteOAuth)

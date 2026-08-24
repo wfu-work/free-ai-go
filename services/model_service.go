@@ -263,6 +263,62 @@ func (s ModelService) SetEnabled(guid string, enabled bool) error {
 	return nil
 }
 
+// DeleteByGuid 删除没有可用账号的模型目录及其关联策略。
+//
+// 模型目录是账号同步产生的缓存记录，因此只允许删除当前没有可用账号
+// 的模型。使用硬删除是为了让后续账号同步可以重新创建同一官方模型身份，
+// 避免软删除记录占用唯一索引。
+func (s ModelService) DeleteByGuid(guid string) error {
+	guid = strings.TrimSpace(guid)
+	if guid == "" {
+		return errors.New("model guid is required")
+	}
+
+	var model domains.ModelCatalog
+	var accountGroup string
+	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("guid = ?", guid).First(&model).Error; err != nil {
+			return err
+		}
+		var exposure domains.ModelExposure
+		if err := tx.Where("model_catalog_guid = ?", guid).First(&exposure).Error; err == nil {
+			accountGroup = exposure.AccountGroup
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		var available int64
+		if err := tx.Table("fmg_account_model AS relation").
+			Joins("JOIN fmg_account AS account ON account.guid = relation.account_guid AND account.deleted_time IS NULL").
+			Where("relation.model_catalog_guid = ? AND relation.deleted_time IS NULL AND relation.available = ? AND account.enabled = ?", guid, true, true).
+			Count(&available).Error; err != nil {
+			return err
+		}
+		if available > 0 {
+			return errors.New("模型仍有可用账号，不能删除")
+		}
+
+		// 关联表和暴露策略都使用软删除，删除模型时必须硬删除，避免
+		// 同一模型重新同步时被唯一索引或残留策略阻塞。
+		if err := tx.Unscoped().Where("model_catalog_guid = ?", guid).Delete(&domains.AccountModelAvailability{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Unscoped().Where("model_catalog_guid = ?", guid).Delete(&domains.ModelExposure{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Where("guid = ?", guid).Delete(&domains.ModelCatalog{}).Error
+	})
+	if err != nil {
+		return err
+	}
+
+	AccountGroupServiceApp.RefreshSummaries(accountGroup)
+	AuditServiceApp.Record("", "model.catalog.delete", "model_catalog", guid, map[string]string{
+		"remoteModelId": model.RemoteModelID,
+	})
+	return nil
+}
+
 // ListEnabled 返回已启用且对外可见的路由模型。
 func (s ModelService) ListEnabled() ([]RoutedModel, error) {
 	var exposures []domains.ModelExposure

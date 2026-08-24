@@ -116,16 +116,17 @@ type AccountListItem struct {
 }
 
 // AccountGatewayUsage 是账号在本地请求日志保留窗口内的网关用量。
-// CostAvailable 仅在窗口内所有具有 Token 用量的请求都匹配到官方参考价时为 true，避免把缺失定价展示成零成本。
+// 参考成本只累计已匹配定价的请求；未配置定价的模型不会阻断其余请求的成本展示。
 type AccountGatewayUsage struct {
-	Since          int64   `json:"since"`
-	Until          int64   `json:"until"`
-	Requests       int64   `json:"requests"`
-	TotalTokens    int64   `json:"totalTokens"`
-	CostMicrousd   int64   `json:"costMicrousd"`
-	CostAmount     float64 `json:"costAmount"`
-	PricedRequests int64   `json:"pricedRequests"`
-	CostAvailable  bool    `json:"costAvailable"`
+	Since             int64   `json:"since"`
+	Until             int64   `json:"until"`
+	Requests          int64   `json:"requests"`
+	TotalTokens       int64   `json:"totalTokens"`
+	CostMicrousd      int64   `json:"costMicrousd"`
+	CostAmount        float64 `json:"costAmount"`
+	PriceableRequests int64   `json:"priceableRequests"`
+	PricedRequests    int64   `json:"pricedRequests"`
+	CostAvailable     bool    `json:"costAvailable"`
 }
 
 type UsageRefreshSweepResult struct {
@@ -620,18 +621,20 @@ func queryAccountGatewayUsage(db *gorm.DB, accountGuids []string, since, until i
 		return nil, err
 	}
 	for _, row := range rows {
-		usageByAccount[row.AccountGuid] = AccountGatewayUsage{
-			Since:          since,
-			Until:          until,
-			Requests:       row.Requests,
-			TotalTokens:    row.InputTokens + row.OutputTokens,
-			CostMicrousd:   row.CostMicrousd,
-			CostAmount:     microusdToUSD(row.CostMicrousd),
-			PricedRequests: row.PricedRequests,
-			CostAvailable:  row.PricedRequests == row.PriceableRequests,
-		}
+		usageByAccount[row.AccountGuid] = accountGatewayUsageFromRow(row, since, until)
 	}
 	return usageByAccount, nil
+}
+
+func accountGatewayUsageFromRow(row accountGatewayUsageRow, since, until int64) AccountGatewayUsage {
+	return AccountGatewayUsage{
+		Since: since, Until: until, Requests: row.Requests,
+		TotalTokens:  row.InputTokens + row.OutputTokens,
+		CostMicrousd: row.CostMicrousd, CostAmount: microusdToUSD(row.CostMicrousd),
+		PriceableRequests: row.PriceableRequests, PricedRequests: row.PricedRequests,
+		// 未匹配定价的请求已经在 SQL 汇总中忽略，已匹配部分的累计值始终可以展示。
+		CostAvailable: true,
+	}
 }
 
 func (s AccountService) DeleteByGuid(guid string) error {

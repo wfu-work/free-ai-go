@@ -134,6 +134,16 @@ func (a ModelApi) Disable(c *gin.Context) {
 	response.Ok(true, c)
 }
 
+// DeleteByGuid 删除没有可用账号的模型目录。
+// @Router /models/{guid} [delete]
+func (a ModelApi) DeleteByGuid(c *gin.Context) {
+	if err := modelService.DeleteByGuid(c.Param("guid")); err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(true, c)
+}
+
 // Accounts 获取可使用指定模型的账号和最近同步状态。
 // @Router /models/{guid}/accounts [get]
 func (a ModelApi) Accounts(c *gin.Context) {
