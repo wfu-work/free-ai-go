@@ -441,6 +441,12 @@ func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
 	if err != nil {
 		return openai.ResponseRequest{}, err
 	}
+	if req.Endpoint == "/v1/chat/completions" {
+		// free-ai-go pins a published proxy-api-lib version. Keep this boundary
+		// normalization here as a compatibility guard until all deployments use
+		// a library release that includes the image_url mapping.
+		responseReq.Input = normalizeChatCompletionsInput(responseReq.Input)
+	}
 	// 服务端压缩会在响应中返回必须原样携带到下一轮的加密 compaction
 	// item，因此只对能够透传 Responses 输入/输出项的端点启用。
 	if req.Endpoint == "/v1/responses" && req.ContextCompaction {
@@ -454,6 +460,100 @@ func convertProxyRequest(req ProxyRequest) (openai.ResponseRequest, error) {
 		}}
 	}
 	return responseReq, nil
+}
+
+func normalizeChatCompletionsInput(input any) any {
+	switch value := input.(type) {
+	case map[string]any:
+		return []any{normalizeChatMessage(value)}
+	case []any:
+		items := make([]any, 0, len(value))
+		for _, item := range value {
+			if message, ok := item.(map[string]any); ok {
+				items = append(items, normalizeChatMessage(message))
+			} else {
+				items = append(items, item)
+			}
+		}
+		return items
+	default:
+		return input
+	}
+}
+
+func normalizeChatMessage(message map[string]any) map[string]any {
+	if _, hasRole := message["role"]; !hasRole {
+		return message
+	}
+	content, ok := message["content"]
+	if !ok {
+		return message
+	}
+
+	out := make(map[string]any, len(message))
+	for key, value := range message {
+		out[key] = value
+	}
+	out["content"] = normalizeChatContent(content)
+	return out
+}
+
+func normalizeChatContent(content any) any {
+	blocks, ok := content.([]any)
+	if !ok {
+		return content
+	}
+	normalized := make([]any, 0, len(blocks))
+	for _, block := range blocks {
+		if payload, ok := block.(map[string]any); ok {
+			normalized = append(normalized, normalizeChatContentBlock(payload))
+		} else {
+			normalized = append(normalized, block)
+		}
+	}
+	return normalized
+}
+
+func normalizeChatContentBlock(block map[string]any) map[string]any {
+	if block["type"] != "image_url" {
+		return block
+	}
+	source, ok := block["image_url"]
+	if !ok {
+		return block
+	}
+
+	out := make(map[string]any, len(block)+2)
+	for key, value := range block {
+		if key != "type" && key != "image_url" {
+			out[key] = value
+		}
+	}
+	out["type"] = "input_image"
+	switch image := source.(type) {
+	case string:
+		if image != "" {
+			out["image_url"] = image
+		}
+	case map[string]any:
+		if url, ok := image["url"].(string); ok && url != "" {
+			out["image_url"] = url
+		}
+		if fileID, ok := image["file_id"].(string); ok && fileID != "" {
+			out["file_id"] = fileID
+		}
+		if detail, ok := image["detail"]; ok {
+			out["detail"] = detail
+		}
+	default:
+		return block
+	}
+	if _, hasURL := out["image_url"]; !hasURL {
+		if _, hasFileID := out["file_id"]; !hasFileID {
+			return block
+		}
+	}
+	return out
 }
 
 func responseContainsCompaction(response *openai.Response) bool {

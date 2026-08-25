@@ -10,7 +10,7 @@ require (
 	github.com/spf13/cast v1.10.0
 	github.com/swaggo/swag v1.16.6
 	github.com/wfu-work/nav-common-go-lib v0.0.0-20260721155653-38ed4a403c2b
-	github.com/wfu-work/proxy-api-lib v0.0.0-20260824011707-4b856fc934d0
+	github.com/wfu-work/proxy-api-lib v0.0.0-20260825065922-de6f39f2f7f1
 	go.uber.org/zap v1.28.0
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/sync v0.22.0
