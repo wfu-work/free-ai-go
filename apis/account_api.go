@@ -244,7 +244,7 @@ func (a AccountApi) GetByGuid(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Produce json
 // @Param guid path string true "账号guid"
-// @Param days query int false "统计天数，默认 90 天"
+// @Param days query int false "统计天数，默认 30 天，最长 30 天"
 // @Success 200 {object} response.Response{data=services.UsageSummary,msg=string}
 // @Router /accounts/{guid}/usage [get]
 func (a AccountApi) Usage(c *gin.Context) {
@@ -256,10 +256,10 @@ func (a AccountApi) Usage(c *gin.Context) {
 
 	days := cast.ToInt(c.Query("days"))
 	if days <= 0 {
-		days = 90
+		days = services.MaxUsageRetentionDays
 	}
-	if days > 365 {
-		days = 365
+	if days > services.MaxUsageRetentionDays {
+		days = services.MaxUsageRetentionDays
 	}
 	now := time.Now()
 	until := now.UnixMilli()

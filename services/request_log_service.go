@@ -17,6 +17,10 @@ type RequestLogService struct{}
 
 var RequestLogServiceApp = RequestLogService{}
 
+// MaxUsageRetentionDays 是本地请求日志和用量统计允许查询的最长时间窗口。
+// 统一限制在 30 天，避免日志无限增长，也让管理端的日粒度网格保持可读。
+const MaxUsageRetentionDays = 30
+
 // UsageTimelineGranularity 指定用量趋势的时间桶粒度。
 type UsageTimelineGranularity string
 
@@ -262,8 +266,8 @@ func (s RequestLogService) CleanupExpired(retentionDays int) error {
 	if retentionDays <= 0 {
 		retentionDays = Config().CleanupLogRetentionDays
 	}
-	if retentionDays <= 0 {
-		return nil
+	if retentionDays <= 0 || retentionDays > MaxUsageRetentionDays {
+		retentionDays = MaxUsageRetentionDays
 	}
 	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).UnixMilli()
 	return s.ClearBefore(cutoff)
@@ -338,8 +342,9 @@ func (s RequestLogService) usageSummary(since, until int64, granularity UsageTim
 	if until <= 0 {
 		until = time.Now().UnixMilli()
 	}
-	if since <= 0 || since > until {
-		since = until - 30*24*time.Hour.Milliseconds()
+	maxSince := until - MaxUsageRetentionDays*24*time.Hour.Milliseconds()
+	if since <= 0 || since > until || since < maxSince {
+		since = maxSince
 	}
 	// 每个聚合步骤都必须使用独立查询。GORM 的 Select、Group、Order 会保存在
 	// 当前 Statement 中；复用同一个查询会把维度统计的 requests 排序带入趋势查询。
@@ -404,7 +409,7 @@ type usageTimelineRow struct {
 }
 
 // queryUsageTimeline 按时间窗口生成连续趋势点。最近 24 小时按小时聚合，
-// 更长时间按天或最多 90 个时间桶聚合，避免长周期数据拖慢管理端渲染。
+// 更长时间按天或最多 30 个时间桶聚合，避免长周期数据拖慢管理端渲染。
 func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension, granularity UsageTimelineGranularity) ([]UsageTimelinePoint, []ModelUsageTimelineSeries, error) {
 	bucketCount, bucketSize := usageTimelineBuckets(since, until, granularity)
 
@@ -477,7 +482,7 @@ func queryUsageTimeline(db *gorm.DB, since, until int64, models []UsageDimension
 }
 
 func usageTimelineBuckets(since, until int64, granularity UsageTimelineGranularity) (int, int64) {
-	const maxBuckets = 90
+	const maxBuckets = MaxUsageRetentionDays
 	hourMs := time.Hour.Milliseconds()
 	dayMs := (24 * time.Hour).Milliseconds()
 	duration := until - since

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cast"
+	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	"github.com/wfu-work/nav-common-go-lib/response"
 	"go.uber.org/zap"
@@ -111,6 +112,9 @@ func (a RequestLogApi) Clear(c *gin.Context) {
 	if before == 0 {
 		days := cast.ToInt(c.Query("retentionDays"))
 		if days > 0 {
+			if days > services.MaxUsageRetentionDays {
+				days = services.MaxUsageRetentionDays
+			}
 			before = time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 		}
 	}

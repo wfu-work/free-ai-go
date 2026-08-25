@@ -133,7 +133,7 @@ func Config() GatewayConfig {
 		RoutingStrategy:            stringDefault(cast.ToString(m["routing-strategy"]), routingStrategyAdaptiveWeighted),
 		QuotaRefreshSeconds:        int64Default(cast.ToInt64(m["quota-refresh-seconds"]), 180),
 		CooldownSeconds:            int64Default(cast.ToInt64(m["cooldown-seconds"]), 300),
-		CleanupLogRetentionDays:    intDefault(cast.ToInt(m["cleanup-log-retention-days"]), 30),
+		CleanupLogRetentionDays:    normalizeCleanupLogRetentionDays(intDefault(cast.ToInt(m["cleanup-log-retention-days"]), MaxUsageRetentionDays)),
 		SecretKeyFile:              stringDefault(cast.ToString(m["secret-key-file"]), "./data/master.key"),
 		LogPromptContent:           cast.ToBool(m["log-prompt-content"]),
 		UpstreamProxyEnabled:       cast.ToBool(m["upstream-proxy-enabled"]),
@@ -147,8 +147,16 @@ func Config() GatewayConfig {
 		ContextCompactionThreshold: int64Default(cast.ToInt64(m["context-compaction-threshold-tokens"]), defaultContextCompactionThreshold),
 	}
 	applySystemConfigOverrides(&cfg)
+	cfg.CleanupLogRetentionDays = normalizeCleanupLogRetentionDays(cfg.CleanupLogRetentionDays)
 	cfg.ContextCompactionThreshold = normalizeContextCompactionThreshold(cfg.ContextCompactionThreshold)
 	return cfg
+}
+
+func normalizeCleanupLogRetentionDays(days int) int {
+	if days <= 0 || days > MaxUsageRetentionDays {
+		return MaxUsageRetentionDays
+	}
+	return days
 }
 
 func applySystemConfigOverrides(cfg *GatewayConfig) {

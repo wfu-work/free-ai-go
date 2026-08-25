@@ -105,16 +105,16 @@ func (a OpsApi) Stats(c *gin.Context) {
 // @Tags 运维模块
 // @Security ApiKeyAuth
 // @Produce json
-// @Param days query int false "统计天数，默认 30 天"
+// @Param days query int false "统计天数，默认 30 天，最长 30 天"
 // @Success 200 {object} response.Response{data=services.UsageSummary,msg=string}
 // @Router /ops/usage [get]
 func (a OpsApi) Usage(c *gin.Context) {
 	days := cast.ToInt(c.Query("days"))
 	if days <= 0 {
-		days = 30
+		days = services.MaxUsageRetentionDays
 	}
-	if days > 365 {
-		days = 365
+	if days > services.MaxUsageRetentionDays {
+		days = services.MaxUsageRetentionDays
 	}
 	now := time.Now()
 	to := now.UnixMilli()
