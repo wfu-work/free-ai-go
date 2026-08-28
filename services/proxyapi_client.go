@@ -739,6 +739,50 @@ func classifyError(err error) string {
 	return classifyUnstructuredError(err.Error())
 }
 
+// ClassifyProxyError 返回代理层对错误的稳定分类。
+//
+// 代理 API 层需要根据错误来源选择准确的 OpenAI-compatible 错误码，
+// 不能仅凭 HTTP 状态码判断。例如本地路由没有候选账号和上游服务返回
+// HTTP 503 都可能使用 503，但两者对下游的处理方式完全不同。
+func ClassifyProxyError(err error) string {
+	return classifyError(err)
+}
+
+// IsTransientUpstreamCapacityError 判断上游是否返回了暂态容量错误。
+// ChatGPT Codex 在服务容量不足时可能返回 HTTP 503 + no_available_account。
+// 该错误说明本次请求无法分配上游容量，不足以证明 OAuth 账号已经失效；
+// 如果将它累计为账号故障，会在官方短暂抖动时把整个账号池冷却掉。
+func IsTransientUpstreamCapacityError(result *ProxyResult, err error) bool {
+	status := 0
+	parts := make([]string, 0, 4)
+	if result != nil {
+		status = result.StatusCode
+		parts = append(parts, result.ErrorType, result.ErrorSummary)
+	}
+	if err != nil {
+		var openAIErr *openai.APIError
+		if errors.As(err, &openAIErr) {
+			status = openAIErr.StatusCode
+			parts = append(parts, openAIErr.Code, openAIErr.Type, openAIErr.Message)
+		}
+		var chatGPTErr *chatgpt.APIError
+		if errors.As(err, &chatGPTErr) {
+			status = chatGPTErr.StatusCode
+			parts = append(parts, chatGPTErr.Code, chatGPTErr.Type, chatGPTErr.Message)
+		}
+	}
+	// SSE 可能先以 HTTP 200 建立连接，再通过首个 response.failed 事件
+	// 报告容量不足；这类响应同样属于暂态故障。
+	if status != http.StatusServiceUnavailable && (status < 200 || status >= 300) {
+		return false
+	}
+	text := strings.ToLower(strings.Join(parts, " "))
+	return strings.Contains(text, "no_available_account") ||
+		strings.Contains(text, "server_is_overloaded") ||
+		strings.Contains(text, "service_unavailable_error") ||
+		strings.Contains(text, "servers are currently overloaded")
+}
+
 func classifyDownstreamWriteError(err error) string {
 	if err == nil {
 		return ""

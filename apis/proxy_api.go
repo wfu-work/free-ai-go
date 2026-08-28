@@ -206,13 +206,28 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		if status == 0 {
 			status = http.StatusBadGateway
 		}
-		code := proxyErrorCode(status)
+		errorType := services.ClassifyProxyError(err)
+		code := proxyErrorCode(status, errorType)
+		// 上游错误也可能携带 Retry-After、请求追踪 ID 等端到端响应头。
+		// 先复制安全响应头，再生成统一错误体，避免下游丢失官方的退避提示。
+		contentType := ""
+		if out.Header != nil {
+			contentType = strings.ToLower(out.Header.Get("Content-Type"))
+		}
+		if out.Header != nil && (!stream || strings.HasPrefix(contentType, "application/json")) {
+			copyProxyResponseHeaders(c.Writer.Header(), out.Header)
+		}
 		message := err.Error()
 		if status == http.StatusInternalServerError {
 			message = "internal server error"
 		}
 		if status == http.StatusTooManyRequests {
 			c.Header("Retry-After", "60")
+		}
+		if status == http.StatusServiceUnavailable && c.Writer.Header().Get("Retry-After") == "" {
+			// 本地没有候选账号或上游容量暂时不足时，给下游一个短退避，
+			// 避免同一批请求立即打满所有重试机会。
+			c.Header("Retry-After", "1")
 		}
 		c.JSON(status, openAIError(code, message))
 		return
@@ -249,7 +264,7 @@ func readProxyMetadata(body []byte) (string, bool, error) {
 	return strings.TrimSpace(payload.Model), payload.Stream, nil
 }
 
-func proxyErrorCode(status int) string {
+func proxyErrorCode(status int, errorType string) string {
 	switch status {
 	case http.StatusBadRequest:
 		return "invalid_request_error"
@@ -260,7 +275,16 @@ func proxyErrorCode(status int) string {
 	case http.StatusTooManyRequests:
 		return "platform_key_limited"
 	case http.StatusServiceUnavailable:
-		return "no_available_account"
+		// 503 既可能来自本地路由阶段，也可能是账号上游返回的服务错误。
+		// 只有明确分类为 no_available_account 时才保留该语义，避免把
+		// OpenAI/上游代理的 503 误报成账号池为空。
+		if errorType == domains.ErrorNoAvailableAccount {
+			return errorType
+		}
+		if errorType == domains.ErrorUpstreamHTTP5xx || errorType == domains.ErrorUpstream5xx {
+			return errorType
+		}
+		return "proxy_error"
 	default:
 		return "proxy_error"
 	}

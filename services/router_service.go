@@ -38,6 +38,33 @@ type RouteSelection struct {
 	AdaptiveAcquired      bool            `json:"-"`
 }
 
+// NoAvailableAccountError 表示请求在本地路由阶段没有找到候选账号。
+// Error 保持稳定的 no_available_account 机器可读错误码；Summary 提供
+// 管理端日志所需的筛选上下文，避免和上游 HTTP 5xx 混淆。
+type NoAvailableAccountError struct {
+	ModelName            string
+	UpstreamModel        string
+	CatalogGuid          string
+	AccountGroup         string
+	EligibleAccountCount int
+	ModelAvailableCount  int
+	MatchedAccountCount  int
+}
+
+func (e *NoAvailableAccountError) Error() string {
+	return domains.ErrorNoAvailableAccount
+}
+
+func (e *NoAvailableAccountError) Summary() string {
+	if e == nil {
+		return domains.ErrorNoAvailableAccount
+	}
+	return fmt.Sprintf(
+		"no available account matched model %q (upstream=%q catalog=%q account_group=%q eligible=%d model_available=%d matched=%d)",
+		e.ModelName, e.UpstreamModel, e.CatalogGuid, e.AccountGroup, e.EligibleAccountCount, e.ModelAvailableCount, e.MatchedAccountCount,
+	)
+}
+
 func (s RouterService) Select(modelName string) (RouteSelection, error) {
 	return s.SelectExcluding(modelName, nil)
 }
@@ -99,7 +126,11 @@ func (s RouterService) SelectForKeyWithAffinity(modelName string, excluded map[s
 		}
 	}
 	if len(candidates) == 0 {
-		return RouteSelection{}, errors.New(domains.ErrorNoAvailableAccount)
+		return RouteSelection{}, &NoAvailableAccountError{
+			ModelName: modelName, UpstreamModel: model.UpstreamModel, CatalogGuid: model.CatalogGuid,
+			AccountGroup: accountGroup, EligibleAccountCount: len(accounts),
+			ModelAvailableCount: len(availableGuids), MatchedAccountCount: len(candidates),
+		}
 	}
 	strategy := Config().RoutingStrategy
 	if strings.TrimSpace(affinityKey) == "" {

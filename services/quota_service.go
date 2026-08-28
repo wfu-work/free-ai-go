@@ -35,9 +35,16 @@ type QuotaInput struct {
 
 const QuotaExhaustedPercentThreshold = 99.5
 
+// quotaRoutingSampleMaxAge limits non-authoritative quota samples used by
+// routing. Official wham snapshots remain authoritative until their reset;
+// response headers and active probes are only hints and must not permanently
+// take an account out of the pool after a transient or partial outage.
+const quotaRoutingSampleMaxAge = 15 * time.Minute
+
 func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
 	input.AccountGuid = strings.TrimSpace(input.AccountGuid)
 	input.WindowType = strings.TrimSpace(input.WindowType)
+	input.Source = strings.TrimSpace(input.Source)
 	if input.AccountGuid == "" {
 		return domains.AccountQuota{}, errors.New("accountGuid is required")
 	}
@@ -58,11 +65,18 @@ func (s QuotaService) Upsert(input QuotaInput) (domains.AccountQuota, error) {
 		"extra":                input.Extra,
 	}
 	var quota domains.AccountQuota
-	err := global.NAV_DB.Where("account_guid = ? AND window_type = ?", input.AccountGuid, input.WindowType).First(&quota).Error
+	identity := global.NAV_DB.Where("account_guid = ? AND window_type = ?", input.AccountGuid, input.WindowType)
+	// Keep authoritative /wham snapshots separate from response-header and probe
+	// samples. They may describe the same window, but a normal request must not
+	// overwrite the official subscription quota shown in the account card.
+	if input.Source != "" {
+		identity = identity.Where("source = ?", input.Source)
+	}
+	err := identity.First(&quota).Error
 	if err == nil {
 		err = global.NAV_DB.Model(&quota).Updates(updates).Error
 		if err == nil {
-			_ = global.NAV_DB.Where("account_guid = ? AND window_type = ?", input.AccountGuid, input.WindowType).First(&quota).Error
+			_ = identity.First(&quota).Error
 		}
 		return quota, err
 	}
@@ -183,7 +197,7 @@ func (s QuotaService) ReconcileSnapshot(accountGuid, source string, activeWindow
 			domains.QuotaStatusExhausted, domains.QuotaStatusAvailable,
 		)
 		return tx.Model(&domains.AccountQuota{}).
-			Where("account_guid = ?", accountGuid).
+			Where("account_guid = ? AND source = ?", accountGuid, source).
 			Update("status", status).Error
 	})
 }
@@ -253,15 +267,67 @@ func (s QuotaService) HasBlockingQuota(accountGuid string) (bool, error) {
 	if err := global.NAV_DB.Where("account_guid = ? AND (reset_at = 0 OR reset_at > ?)", accountGuid, now).Find(&quotas).Error; err != nil {
 		return false, err
 	}
-	for _, quota := range quotas {
-		if quota.Status == domains.QuotaStatusExhausted || quota.LimitReached != nil && *quota.LimitReached || quota.Allowed != nil && !*quota.Allowed {
-			return true, nil
-		}
-		if quota.UsedPercent != nil && *quota.UsedPercent >= QuotaExhaustedPercentThreshold {
-			return true, nil
-		}
+	if quotaSetBlocksRouting(quotas, now) {
+		return true, nil
 	}
 	return false, nil
+}
+
+// quotaSetBlocksRouting prefers an official wham snapshot for the same
+// window. A response-header or active-probe sample can be used as a fallback
+// when no official snapshot exists, but must not override a newer authoritative
+// subscription response and make the account appear unavailable in routing.
+func quotaSetBlocksRouting(quotas []domains.AccountQuota, now int64) bool {
+	officialWindows := make(map[string]struct{})
+	for _, quota := range quotas {
+		if strings.EqualFold(strings.TrimSpace(quota.Source), "wham") {
+			officialWindows[quotaWindowIdentity(quota)] = struct{}{}
+		}
+	}
+	for _, quota := range quotas {
+		source := strings.ToLower(strings.TrimSpace(quota.Source))
+		if source != "" && source != "wham" {
+			if _, official := officialWindows[quotaWindowIdentity(quota)]; official {
+				continue
+			}
+		}
+		if quotaBlocksRouting(quota, now) {
+			return true
+		}
+	}
+	return false
+}
+
+func quotaWindowIdentity(quota domains.AccountQuota) string {
+	windowType := strings.ToLower(strings.TrimSpace(quota.WindowType))
+	if strings.HasSuffix(windowType, ":5h") || windowType == "5h" {
+		return "5h"
+	}
+	if strings.HasSuffix(windowType, ":7d") || windowType == "7d" {
+		return "7d"
+	}
+	if quota.LimitWindowSeconds > 0 {
+		return fmt.Sprintf("seconds:%d", quota.LimitWindowSeconds)
+	}
+	return "name:" + windowType
+}
+
+// quotaBlocksRouting determines whether one persisted quota snapshot should
+// remove an account from routing. Non-wham samples are deliberately bounded
+// by freshness because they are observational hints rather than an
+// authoritative subscription snapshot.
+func quotaBlocksRouting(quota domains.AccountQuota, now int64) bool {
+	source := strings.ToLower(strings.TrimSpace(quota.Source))
+	if source != "" && source != "wham" {
+		maxAge := quotaRoutingSampleMaxAge.Milliseconds()
+		if quota.LastSyncedAt <= 0 || quota.LastSyncedAt < now-maxAge {
+			return false
+		}
+	}
+	if quota.Status == domains.QuotaStatusExhausted || quota.LimitReached != nil && *quota.LimitReached || quota.Allowed != nil && !*quota.Allowed {
+		return true
+	}
+	return quota.UsedPercent != nil && *quota.UsedPercent >= QuotaExhaustedPercentThreshold
 }
 
 func (s QuotaService) RecoverCooldownAccounts() error {

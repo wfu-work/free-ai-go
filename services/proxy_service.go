@@ -180,7 +180,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		if attemptErrorType == "" && err != nil {
 			attemptErrorType = classifyError(err)
 		}
-		if accountFailureRelevant(attemptErrorType) {
+		if accountFailureRelevant(attemptErrorType) && !IsTransientUpstreamCapacityError(result, err) {
 			QuotaServiceApp.ApplyErrorWithPolicy(selection.Account.Guid, attemptErrorType, AccountFailurePolicy{
 				PreserveLastAvailable: selection.AvailableAccountCount == 1,
 			})
@@ -204,6 +204,31 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		switchReasons = append(switchReasons, selection.Account.Guid+":"+reason)
 	}
 	if noAvailableAccountBeforeUpstream(lastSelection, lastErr) {
+		// 路由阶段没有候选账号时此前会直接返回，导致管理端只能看到下游
+		// 的 503，而无法判断是账号组、模型关系、额度或账号状态筛选导致。
+		// 记录一条不包含凭据的诊断日志，保留 no_available_account 语义供
+		// 下游重试，同时让管理员可以和真实上游 5xx 区分开。
+		errorSummary := lastErr.Error()
+		var noAvailableErr *NoAvailableAccountError
+		if errors.As(lastErr, &noAvailableErr) {
+			errorSummary = noAvailableErr.Summary()
+		}
+		_ = RequestLogServiceApp.Record(RequestLogInput{
+			RequestID:       requestID,
+			Method:          logMeta.Method,
+			Path:            logMeta.Path,
+			PlatformKeyID:   platformKey.Guid,
+			PlatformKey:     platformKey.Name,
+			KeyPrefix:       platformKey.KeyPrefix,
+			Model:           modelName,
+			ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
+			ServiceTier:     firstNonEmpty(logMeta.ServiceTier, platformKey.ServiceTier),
+			StatusCode:      http.StatusServiceUnavailable,
+			ErrorType:       domains.ErrorNoAvailableAccount,
+			ErrorSummary:    errorSummary,
+			LatencyMs:       time.Since(start).Milliseconds(),
+			GatewayQueueMs:  ingress.GatewayQueueMs,
+		})
 		return lastOutput, lastErr
 	}
 	// Initial overload events stay hidden while another account can be tried.
@@ -349,7 +374,11 @@ func replayBufferedStreamError(w io.Writer, result *ProxyResult) error {
 }
 
 func noAvailableAccountBeforeUpstream(selection RouteSelection, err error) bool {
-	return selection.Account.Guid == "" && err != nil && err.Error() == domains.ErrorNoAvailableAccount
+	if selection.Account.Guid != "" || err == nil {
+		return false
+	}
+	var noAvailableErr *NoAvailableAccountError
+	return errors.As(err, &noAvailableErr) || err.Error() == domains.ErrorNoAvailableAccount
 }
 
 type requestLogMetadata struct {
