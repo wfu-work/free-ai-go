@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -884,7 +886,235 @@ func (s AccountService) fetchUsageWithFile(ctx context.Context, account domains.
 	if err != nil {
 		return nil, err
 	}
-	return client.Usage.Get(ctx, accountRouteID(account, file))
+	usage, err := client.Usage.Get(ctx, accountRouteID(account, file))
+	if err != nil {
+		return nil, err
+	}
+	// The wham endpoint has returned both snake_case and camelCase window
+	// fields during the Pro quota rollout. The protocol library keeps the
+	// stable legacy shape for compatibility, so recover the aliases here from
+	// Raw before persisting a snapshot. A Pro account with one unlabelled long
+	// window is the official weekly quota, not a zero-use 5-hour window.
+	usage.RateLimit = normalizeUsageRateLimit(usage.Raw, usage.RateLimit, isProAccount(account, file, usage))
+	return usage, nil
+}
+
+const (
+	usageFiveHourWindowSeconds = int64(5 * time.Hour / time.Second)
+	usageWeeklyWindowSeconds   = int64(7 * 24 * time.Hour / time.Second)
+)
+
+// isProAccount recognizes the plan from every source available during a
+// refresh. Some historical account files contain plan_type=free while their
+// subscription_plan (or JWT metadata) is pro, so a single field is not enough.
+func isProAccount(account domains.Account, file *codexauth.AccountFile, usage *chatgpt.UsageSnapshot) bool {
+	values := []string{account.PlanType, account.SubscriptionPlan}
+	if file != nil {
+		values = append(values, file.Meta.PlanType, file.Meta.SubscriptionPlan)
+	}
+	if usage != nil {
+		values = append(values, usage.PlanType)
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(usage.Raw, &fields) == nil {
+			var rawPlan string
+			if json.Unmarshal(firstRawField(fields, "plan_type", "planType"), &rawPlan) == nil {
+				values = append(values, rawPlan)
+			}
+		}
+	}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		normalized = strings.ReplaceAll(normalized, "-", "")
+		normalized = strings.ReplaceAll(normalized, "_", "")
+		normalized = strings.TrimPrefix(normalized, "chatgpt")
+		if normalized == "pro" || normalized == "proplan" {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeUsageRateLimit restores common field aliases used by the official
+// endpoint. The returned value is always safe for SyncRateLimit to persist;
+// the complete original payload remains in the quota Extra column.
+func normalizeUsageRateLimit(raw []byte, parsed *chatgpt.RateLimit, pro bool) *chatgpt.RateLimit {
+	if len(raw) == 0 {
+		return parsed
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return parsed
+	}
+	rateRaw := firstRawField(root, "rate_limit", "rateLimit")
+	if len(rateRaw) == 0 || string(rateRaw) == "null" {
+		return parsed
+	}
+	var rate map[string]json.RawMessage
+	if err := json.Unmarshal(rateRaw, &rate); err != nil {
+		return parsed
+	}
+	current := parsed
+	if current == nil {
+		current = &chatgpt.RateLimit{}
+	}
+	primary := decodeUsageWindow(firstRawField(rate, "primary_window", "primaryWindow", "primary"), current.PrimaryWindow)
+	secondary := decodeUsageWindow(firstRawField(rate, "secondary_window", "secondaryWindow", "secondary", "weekly_window", "weeklyWindow", "week_window", "weekWindow"), current.SecondaryWindow)
+	allowed := decodeUsageBool(firstRawField(rate, "allowed"))
+	limitReached := decodeUsageBool(firstRawField(rate, "limit_reached", "limitReached"))
+	if allowed == nil {
+		allowed = current.Allowed
+	}
+	if limitReached == nil {
+		limitReached = current.LimitReached
+	}
+	if primary == nil && secondary == nil && allowed == nil && limitReached == nil {
+		return parsed
+	}
+	if primary == nil {
+		primary = current.PrimaryWindow
+	}
+	if secondary == nil {
+		secondary = current.SecondaryWindow
+	}
+	// A single Pro window without duration is the new official weekly window.
+	// Do this only for a genuinely single window; when two windows are present
+	// their primary/secondary roles must remain independent.
+	if pro && primary != nil && secondary == nil && primary.LimitWindowSeconds == nil {
+		seconds := usageWeeklyWindowSeconds
+		copy := *primary
+		copy.LimitWindowSeconds = &seconds
+		primary = &copy
+	}
+	return &chatgpt.RateLimit{
+		Allowed: allowed, LimitReached: limitReached,
+		PrimaryWindow: primary, SecondaryWindow: secondary,
+	}
+}
+
+func decodeUsageWindow(raw json.RawMessage, fallback *chatgpt.RateLimitWindow) *chatgpt.RateLimitWindow {
+	if len(raw) == 0 || string(raw) == "null" {
+		return fallback
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fallback
+	}
+	window := &chatgpt.RateLimitWindow{}
+	window.UsedPercent = decodeUsageFloat(firstRawField(fields, "used_percent", "usedPercent"))
+	if window.UsedPercent == nil {
+		if remaining := decodeUsageFloat(firstRawField(fields, "remaining_percent", "remainingPercent")); remaining != nil {
+			value := 100 - *remaining
+			window.UsedPercent = &value
+		}
+	}
+	window.LimitWindowSeconds = decodeUsageInt(firstRawField(fields, "limit_window_seconds", "limitWindowSeconds"))
+	window.ResetAt = decodeUsageTimestamp(firstRawField(fields, "reset_at", "resets_at", "resetAt", "resetsAt"))
+	if window.UsedPercent == nil && window.LimitWindowSeconds == nil && window.ResetAt == nil {
+		return fallback
+	}
+	if window.UsedPercent == nil && fallback != nil {
+		window.UsedPercent = fallback.UsedPercent
+	}
+	if window.LimitWindowSeconds == nil && fallback != nil {
+		window.LimitWindowSeconds = fallback.LimitWindowSeconds
+	}
+	if window.ResetAt == nil && fallback != nil {
+		window.ResetAt = fallback.ResetAt
+	}
+	return window
+}
+
+func firstRawField(fields map[string]json.RawMessage, names ...string) json.RawMessage {
+	for _, name := range names {
+		if value, ok := fields[name]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func decodeUsageFloat(raw json.RawMessage) *float64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return nil
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(text, "%")), 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return nil
+		}
+		value = parsed
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	return &value
+}
+
+func decodeUsageInt(raw json.RawMessage) *int64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value int64
+	if json.Unmarshal(raw, &value) == nil && value >= 0 {
+		return &value
+	}
+	var decimal float64
+	if json.Unmarshal(raw, &decimal) == nil && decimal >= 0 && decimal <= math.MaxInt64 && math.Trunc(decimal) == decimal {
+		value = int64(decimal)
+		return &value
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return nil
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
+	if err != nil || parsed < 0 {
+		return nil
+	}
+	return &parsed
+}
+
+func decodeUsageBool(raw json.RawMessage) *bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value bool
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
+	}
+	return &value
+}
+
+func decodeUsageTimestamp(raw json.RawMessage) *int64 {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var number int64
+	if json.Unmarshal(raw, &number) == nil {
+		if number > 1_000_000_000_000 {
+			number /= 1000
+		}
+		if number > 0 {
+			return &number
+		}
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(text)); err == nil {
+		value := parsed.Unix()
+		return &value
+	}
+	return nil
 }
 
 func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]any, error) {
