@@ -221,9 +221,40 @@ func quotaInputFromWindow(accountGuid, windowType, source string, limit *chatgpt
 			input.ResetAt = time.Unix(*window.ResetAt, 0).UnixMilli()
 		}
 	}
+	// allowed/limit_reached in the official /wham/usage response describe the
+	// whole rate-limit group, not this individual window. Copying those global
+	// flags to every window makes a depleted 5-hour window incorrectly mark the
+	// healthy 7-day window as exhausted. Retain the group status only for the
+	// sole window, the window whose own usage proves exhaustion, or a primary
+	// fallback when the group is exhausted but neither window exposes an
+	// exhausted percentage. The complete response remains available in Extra
+	// for diagnostics.
 	if limit != nil {
-		input.Allowed = limit.Allowed
-		input.LimitReached = limit.LimitReached
+		windowCount := 0
+		if limit.PrimaryWindow != nil {
+			windowCount++
+		}
+		if limit.SecondaryWindow != nil {
+			windowCount++
+		}
+		windowExhausted := window != nil && window.UsedPercent != nil && *window.UsedPercent >= QuotaExhaustedPercentThreshold
+		groupExhausted := limit.LimitReached != nil && *limit.LimitReached || limit.Allowed != nil && !*limit.Allowed
+		otherWindowExhausted := false
+		if limit.PrimaryWindow != nil && limit.PrimaryWindow != window && limit.PrimaryWindow.UsedPercent != nil {
+			otherWindowExhausted = *limit.PrimaryWindow.UsedPercent >= QuotaExhaustedPercentThreshold
+		}
+		if limit.SecondaryWindow != nil && limit.SecondaryWindow != window && limit.SecondaryWindow.UsedPercent != nil {
+			otherWindowExhausted = otherWindowExhausted || *limit.SecondaryWindow.UsedPercent >= QuotaExhaustedPercentThreshold
+		}
+		// If the group is exhausted but neither window exposes a usable
+		// percentage, retain the status on the primary row as a routing fallback.
+		// It is still not copied to the other row, so the UI cannot show both as
+		// exhausted.
+		primaryFallback := windowCount > 1 && groupExhausted && !windowExhausted && !otherWindowExhausted && window == limit.PrimaryWindow
+		if windowCount <= 1 || windowExhausted || primaryFallback {
+			input.Allowed = limit.Allowed
+			input.LimitReached = limit.LimitReached
+		}
 	}
 	return input
 }
