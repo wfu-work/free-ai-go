@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -181,15 +182,19 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			attemptErrorType = classifyError(err)
 		}
 		if accountFailureRelevant(attemptErrorType) && !IsTransientUpstreamCapacityError(result, err) {
-			QuotaServiceApp.ApplyErrorWithPolicy(selection.Account.Guid, attemptErrorType, AccountFailurePolicy{
+			policy := AccountFailurePolicy{
 				PreserveLastAvailable: selection.AvailableAccountCount == 1,
-			})
+			}
+			if attemptErrorType == domains.ErrorRateLimited && result != nil {
+				policy.CooldownUntil = retryAfterUntil(result.Header, time.Now())
+			}
+			QuotaServiceApp.ApplyErrorWithPolicy(selection.Account.Guid, attemptErrorType, policy)
 		}
 		if result != nil && len(result.Header) > 0 {
 			_, _ = QuotaServiceApp.SampleHeaders(selection.Account.Guid, "response_header", result.Header)
 		}
 		if err == nil && (result == nil || result.ErrorType == "") {
-			_ = AccountServiceApp.MarkUsed(selection.Account.Guid)
+			_ = AccountServiceApp.MarkUsedIfCurrent(selection.Account.Guid, selection.Account.HealthVersion)
 			break
 		}
 		if !shouldRetry(result, err, stream) || attempt == maxAttempts-1 {
@@ -510,6 +515,13 @@ func shouldRetry(result *ProxyResult, err error, stream bool) bool {
 	if stream && result != nil && result.StreamStarted {
 		return false
 	}
+	// An upstream capacity error is transient and can be retried with another
+	// account. A local NoAvailableAccountError has no selected account and is
+	// deliberately excluded by IsTransientUpstreamCapacityError, so it will
+	// not cause a tight retry loop over an empty pool.
+	if IsTransientUpstreamCapacityError(result, err) {
+		return true
+	}
 	errorType := ""
 	if result != nil {
 		errorType = result.ErrorType
@@ -525,6 +537,28 @@ func shouldRetry(result *ProxyResult, err error, stream bool) bool {
 	default:
 		return false
 	}
+}
+
+// retryAfterUntil converts an upstream Retry-After header into an absolute
+// cooldown deadline. Both delta-seconds and HTTP-date forms are accepted.
+func retryAfterUntil(header http.Header, now time.Time) int64 {
+	if header == nil {
+		return 0
+	}
+	value := strings.TrimSpace(header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return now.Add(time.Duration(seconds) * time.Second).UnixMilli()
+	}
+	if resetAt, err := http.ParseTime(value); err == nil && resetAt.After(now) {
+		return resetAt.UnixMilli()
+	}
+	return 0
 }
 
 func accountFailureRelevant(errorType string) bool {

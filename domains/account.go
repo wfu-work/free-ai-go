@@ -32,6 +32,7 @@ type Account struct {
 	SubscriptionExpiredAt int64  `json:"subscriptionExpiredAt" gorm:"index;comment:订阅过期时间"`
 	FailureCount          int    `json:"failureCount" gorm:"comment:连续失败次数"`
 	CooldownUntil         int64  `json:"cooldownUntil" gorm:"index;comment:冷却结束时间"`
+	HealthVersion         int64  `json:"-" gorm:"index;comment:账号健康状态版本"`
 	Remark                string `json:"remark" gorm:"comment:备注"`
 }
 

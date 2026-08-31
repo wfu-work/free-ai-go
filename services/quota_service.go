@@ -378,8 +378,12 @@ func (s QuotaService) RecoverCooldownAccounts() error {
 			updates["status"] = domains.AccountStatusExhausted
 			updates["failure_count"] = account.FailureCount
 		}
-		if err := global.NAV_DB.Model(&account).Updates(updates).Error; err != nil {
-			return err
+		updates["health_version"] = gorm.Expr("health_version + 1")
+		result := global.NAV_DB.Model(&domains.Account{}).
+			Where("guid = ? AND health_version = ?", account.Guid, account.HealthVersion).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
 		}
 	}
 	return nil

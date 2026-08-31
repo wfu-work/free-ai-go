@@ -1136,7 +1136,7 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 		if model == "" && len(stats.Models) > 0 {
 			model = stats.Models[0]
 		}
-		_ = s.MarkUsed(account.Guid)
+		_ = s.MarkUsedIfCurrent(account.Guid, account.HealthVersion)
 		return map[string]any{
 			"ok": true, "statusCode": http.StatusOK, "model": model,
 			"latencyMs": time.Since(started).Milliseconds(), "quotas": []domains.AccountQuota{},
@@ -1175,7 +1175,7 @@ func (s AccountService) Probe(guid string, input AccountTestInput) (map[string]a
 	}
 	ok := result.StatusCode >= 200 && result.StatusCode < 300 && result.ErrorType == ""
 	if ok {
-		_ = s.MarkUsed(account.Guid)
+		_ = s.MarkUsedIfCurrent(account.Guid, account.HealthVersion)
 	} else {
 		QuotaServiceApp.ApplyError(account.Guid, result.ErrorType)
 	}
@@ -1238,7 +1238,9 @@ func (s AccountService) SetEnabled(guid string, enabled bool) error {
 	if enabled {
 		status = domains.AccountStatusAvailable
 	}
-	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{"enabled": enabled, "status": status}).Error
+	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
+		"enabled": enabled, "status": status, "health_version": gorm.Expr("health_version + 1"),
+	}).Error
 	if err == nil {
 		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
 	}
@@ -1246,18 +1248,41 @@ func (s AccountService) SetEnabled(guid string, enabled bool) error {
 }
 
 func (s AccountService) MarkUsed(guid string) error {
+	account, err := s.GetByGuid(guid)
+	if err != nil {
+		return err
+	}
+	return s.MarkUsedIfCurrent(guid, account.HealthVersion)
+}
+
+// MarkUsedIfCurrent 仅在账号健康状态没有被更新时恢复账号。
+// 这可以避免一个已经开始执行的旧请求，在较新的 429/鉴权失败之后
+// 又把账号无条件写回 available。
+func (s AccountService) MarkUsedIfCurrent(guid string, expectedHealthVersion int64) error {
 	status := domains.AccountStatusAvailable
 	if blocked, err := QuotaServiceApp.HasBlockingQuota(guid); err == nil && blocked {
 		status = domains.AccountStatusExhausted
 	}
-	return global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
-		"last_used_at": time.Now().UnixMilli(), "failure_count": 0, "status": status,
-	}).Error
+	result := global.NAV_DB.Model(&domains.Account{}).
+		Where("guid = ? AND health_version = ?", guid, expectedHealthVersion).
+		Updates(map[string]any{
+			"last_used_at": time.Now().UnixMilli(), "failure_count": 0, "status": status,
+			"cooldown_until": int64(0), "health_version": gorm.Expr("health_version + 1"),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	// RowsAffected == 0 means a newer health transition won the race. The
+	// successful request must not resurrect that newer state.
+	return nil
 }
 
 // AccountFailurePolicy 控制路由请求失败后是否需要保留最后一个可用账号。
 type AccountFailurePolicy struct {
 	PreserveLastAvailable bool
+	// CooldownUntil allows a provider supplied Retry-After/reset time to take
+	// precedence over the static gateway cooldown.
+	CooldownUntil int64
 }
 
 func (s AccountService) MarkFailure(guid, errorType string) error {
@@ -1266,20 +1291,35 @@ func (s AccountService) MarkFailure(guid, errorType string) error {
 
 // MarkFailureWithPolicy 记录账号失败。最后一个可用账号只豁免可恢复错误触发的自动冷却。
 func (s AccountService) MarkFailureWithPolicy(guid, errorType string, policy AccountFailurePolicy) error {
-	account, err := s.GetByGuid(guid)
-	if err != nil {
-		return err
+	const maxStateUpdateAttempts = 8
+	for attempt := 0; attempt < maxStateUpdateAttempts; attempt++ {
+		account, err := s.GetByGuid(guid)
+		if err != nil {
+			return err
+		}
+		status, cooldownUntil := accountFailureState(
+			account,
+			errorType,
+			policy,
+			time.Now(),
+			time.Duration(Config().CooldownSeconds)*time.Second,
+		)
+		result := global.NAV_DB.Model(&domains.Account{}).
+			Where("guid = ? AND health_version = ?", guid, account.HealthVersion).
+			Updates(map[string]any{
+				"failure_count": gorm.Expr("failure_count + 1"), "status": status,
+				"cooldown_until": cooldownUntil, "health_version": gorm.Expr("health_version + 1"),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 1 {
+			return nil
+		}
+		// A concurrent success/failure changed the row. Re-read it and apply
+		// the failure policy to the newest state instead of losing the event.
 	}
-	status, cooldownUntil := accountFailureState(
-		account,
-		errorType,
-		policy,
-		time.Now(),
-		time.Duration(Config().CooldownSeconds)*time.Second,
-	)
-	return global.NAV_DB.Model(&account).Updates(map[string]any{
-		"failure_count": account.FailureCount + 1, "status": status, "cooldown_until": cooldownUntil,
-	}).Error
+	return errors.New("account health state changed too frequently")
 }
 
 func accountFailureState(account domains.Account, errorType string, policy AccountFailurePolicy, now time.Time, cooldown time.Duration) (string, int64) {
@@ -1291,6 +1331,9 @@ func accountFailureState(account domains.Account, errorType string, policy Accou
 	case domains.ErrorRateLimited:
 		status = domains.AccountStatusLimited
 		cooldownUntil = now.Add(cooldown).UnixMilli()
+		if policy.CooldownUntil > now.UnixMilli() {
+			cooldownUntil = policy.CooldownUntil
+		}
 	case domains.ErrorQuotaExhausted:
 		status = domains.AccountStatusExhausted
 	case domains.ErrorUpstreamHTTP5xx, domains.ErrorUpstream5xx, domains.ErrorUpstreamFailed,
@@ -1322,25 +1365,47 @@ func (s AccountService) FindAvailable(accountGroup, model string, limit int) ([]
 	now := time.Now().UnixMilli()
 	query := global.NAV_DB.Where("enabled = ? AND ((credential_type = ? AND encrypted_account_file <> ?) OR (credential_type = ? AND encrypted_api_key <> ?)) AND status NOT IN ?",
 		true, domains.CredentialOAuth, "", domains.CredentialAPIKey, "", []string{
-			domains.AccountStatusDisabled, domains.AccountStatusLimited, domains.AccountStatusCooldown,
-			domains.AccountStatusExpired, domains.AccountStatusInvalid, domains.AccountStatusExhausted,
-		}).Where("(cooldown_until = 0 OR cooldown_until < ?)", now).
+			domains.AccountStatusDisabled, domains.AccountStatusExpired,
+			domains.AccountStatusInvalid, domains.AccountStatusExhausted,
+		}).Where("(status NOT IN ? OR (cooldown_until > 0 AND cooldown_until < ?))", []string{
+		domains.AccountStatusLimited, domains.AccountStatusCooldown,
+	}, now).
 		Where("(subscription_expired_at = 0 OR subscription_expired_at > ? OR subscription_will_renew = ?)", now, true)
 	if accountGroup != "" {
 		query = query.Where("account_group = ?", accountGroup)
 	}
-	var list []domains.Account
-	if err := query.Order("priority asc, last_used_at asc, id asc").Limit(limit).Find(&list).Error; err != nil {
-		return nil, err
-	}
-	available := make([]domains.Account, 0, len(list))
-	for _, account := range list {
-		blocked, err := QuotaServiceApp.HasBlockingQuota(account.Guid)
-		if err != nil {
+	// Quota filtering happens after the account query. Scan in batches so a
+	// large number of quota-blocked accounts at the front of the priority
+	// order cannot hide healthy accounts after the first 100 rows.
+	available := make([]domains.Account, 0, limit)
+	offset := 0
+	for len(available) < limit {
+		batchLimit := limit - len(available)
+		if batchLimit > 100 {
+			batchLimit = 100
+		}
+		var list []domains.Account
+		if err := query.Order("priority asc, last_used_at asc, id asc").Offset(offset).Limit(batchLimit).Find(&list).Error; err != nil {
 			return nil, err
 		}
-		if !blocked {
-			available = append(available, account)
+		if len(list) == 0 {
+			break
+		}
+		for _, account := range list {
+			blocked, err := QuotaServiceApp.HasBlockingQuota(account.Guid)
+			if err != nil {
+				return nil, err
+			}
+			if !blocked {
+				available = append(available, account)
+				if len(available) == limit {
+					break
+				}
+			}
+		}
+		offset += len(list)
+		if len(list) < batchLimit {
+			break
 		}
 	}
 	return available, nil
