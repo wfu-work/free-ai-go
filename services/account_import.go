@@ -182,17 +182,17 @@ func parseSub2APICandidates(raw []byte) (string, []accountImportCandidate, error
 	}
 
 	candidates := make([]accountImportCandidate, 0, len(source.Accounts))
-	seenAccountIDs := make(map[string]struct{}, len(source.Accounts))
+	seenIdentities := make(map[string]struct{}, len(source.Accounts))
 	for index, account := range source.Accounts {
 		candidate := accountImportCandidate{Index: index, Name: sub2APIAccountName(account), Priority: account.Priority}
 		file, err := convertSub2APIAccount(source, account)
 		if err == nil {
-			accountID := file.Tokens.AccountID
-			if _, exists := seenAccountIDs[accountID]; exists {
-				err = errors.New("duplicate account identifier in sub2api file")
+			identityKey := accountIdentityKey(file)
+			if _, exists := seenIdentities[identityKey]; exists {
+				err = errors.New("duplicate OAuth account identity in sub2api file")
 				file = nil
 			} else {
-				seenAccountIDs[accountID] = struct{}{}
+				seenIdentities[identityKey] = struct{}{}
 			}
 		}
 		candidate.File = file

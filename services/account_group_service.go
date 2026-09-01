@@ -241,7 +241,7 @@ func (s AccountGroupService) RefreshSummary(groupName string) error {
 		if account.Enabled {
 			enabledAccounts++
 		}
-		if account.Enabled && account.Status == domains.AccountStatusAvailable {
+		if account.Enabled && domains.EffectiveAccountStatus(account.Status, account.TokenStatus) == domains.AccountStatusAvailable {
 			availableAccounts++
 		}
 	}

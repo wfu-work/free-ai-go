@@ -1,5 +1,7 @@
 package domains
 
+import "strings"
+
 const (
 	VendorOpenAI              = "openai"
 	VendorGoogle              = "google"
@@ -58,3 +60,30 @@ const (
 	DiagnosticClientClosedAfterCompletion = "client_closed_after_completion"
 	DiagnosticContextCompacted            = "context_compacted"
 )
+
+// EffectiveAccountStatus 返回账号对管理端和路由可见的有效状态。
+//
+// 旧版本在 OAuth 刷新失败时只更新 token_status，导致 status 仍然是
+// available。保留这个兼容判断可以让历史数据立即显示为失效，并避免
+// 在调用方尚未完成迁移时继续把无效凭据当作可用账号。
+func EffectiveAccountStatus(status, tokenStatus string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	tokenStatus = strings.ToLower(strings.TrimSpace(tokenStatus))
+	if status != AccountStatusDisabled && tokenStatus == TokenStatusInvalid {
+		return AccountStatusInvalid
+	}
+	if (status == "" || status == AccountStatusAvailable) && tokenStatus == TokenStatusRefreshFailed {
+		return AccountStatusInvalid
+	}
+	return status
+}
+
+// AccountTokenBlocksRouting 判断凭据状态是否已经明确不能用于路由。
+func AccountTokenBlocksRouting(tokenStatus string) bool {
+	switch strings.ToLower(strings.TrimSpace(tokenStatus)) {
+	case TokenStatusRefreshFailed, TokenStatusInvalid:
+		return true
+	default:
+		return false
+	}
+}

@@ -153,7 +153,8 @@ type ModelSyncSweepResult struct {
 	Errors  []string         `json:"errors,omitempty"`
 }
 
-// Import 创建或更新一个规范 OAuth 账号文件。相同 ChatGPT Account ID 会更新原账号，而不是重复入池。
+// Import 创建或更新一个规范 OAuth 账号文件。相同 ChatGPT Account ID 和 OAuth 登录主体会更新原账号；
+// 同一 ChatGPT Account ID 下不同登录主体可作为独立账号入池。
 func (s AccountService) Import(input ImportAccountInput) (domains.Account, error) {
 	raw, err := normalizeAccountFileJSON(input.AccountFile)
 	if err != nil {
@@ -348,11 +349,31 @@ func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool 
 		pool.Weight = 1
 	}
 	group := normalizeAccountGroupName(pool.AccountGroup)
+	authSubject := accountOAuthSubject(file)
 	var existing domains.Account
-	findErr := global.NAV_DB.Where(
+	identityQuery := global.NAV_DB.Where(
 		"vendor_code = ? AND product_code = ? AND chat_gpt_account_id = ?",
 		vendorCode, productCode, file.Tokens.AccountID,
-	).First(&existing).Error
+	)
+	findErr := gorm.ErrRecordNotFound
+	if authSubject != "" {
+		findErr = identityQuery.Where("auth_subject = ?", authSubject).First(&existing).Error
+		if errors.Is(findErr, gorm.ErrRecordNotFound) {
+			// 兼容升级前已有的账号记录：只有邮箱也一致时才回填主体，避免把
+			// 已有账号的 Token 静默替换成同一 Account ID 下的另一个用户。
+			var legacy []domains.Account
+			if err := identityQuery.Where("auth_subject IS NULL OR auth_subject = ''").Find(&legacy).Error; err != nil {
+				return domains.Account{}, err
+			}
+			if len(legacy) == 1 && sameAccountEmail(legacy[0].Email, metadata.email) {
+				existing = legacy[0]
+				findErr = nil
+			}
+		}
+	} else {
+		// 无法从 Token 解析登录主体时保留旧行为，避免相同账号被重复创建。
+		findErr = identityQuery.First(&existing).Error
+	}
 	if findErr == nil {
 		updates := metadata.updates()
 		updates["vendor_code"] = vendorCode
@@ -368,6 +389,9 @@ func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool 
 		updates["enabled"] = true
 		updates["status"] = domains.AccountStatusAvailable
 		updates["last_error"] = ""
+		if authSubject != "" {
+			updates["auth_subject"] = authSubject
+		}
 		if err := global.NAV_DB.Model(&existing).Updates(updates).Error; err != nil {
 			return domains.Account{}, err
 		}
@@ -380,7 +404,7 @@ func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool 
 	}
 	account := domains.Account{
 		VendorCode: vendorCode, ProductCode: productCode, CredentialType: domains.CredentialOAuth,
-		Name: name, Email: metadata.email, ChatGPTAccountID: file.Tokens.AccountID,
+		Name: name, Email: metadata.email, ChatGPTAccountID: file.Tokens.AccountID, AuthSubject: authSubject,
 		WorkspaceID: file.Meta.WorkspaceID, EncryptedAccountFile: encrypted,
 		CredentialHint: accountCredentialHint(file.Tokens.AccountID), PlanType: file.Meta.PlanType,
 		SubscriptionPlan: file.Meta.SubscriptionPlan, SubscriptionExpiredAt: normalizeUnixMillis(file.Meta.SubscriptionExpiresAt),
@@ -584,6 +608,9 @@ func attachAccountQuotas(accounts []domains.Account) ([]AccountListItem, error) 
 		return nil, err
 	}
 	for _, account := range accounts {
+		// 兼容旧数据：历史版本可能只写入 token_status，列表仍会返回
+		// available。对外返回前计算一次有效状态，避免管理端显示误导性状态。
+		account.Status = domains.EffectiveAccountStatus(account.Status, account.TokenStatus)
 		usage, ok := usageByAccount[account.Guid]
 		if !ok {
 			usage = AccountGatewayUsage{Since: since, Until: until, CostAvailable: true}
@@ -725,6 +752,7 @@ func (s AccountService) syncAccountModelsOnce(accountGuid string) (ModelSyncStat
 	}
 	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
+		s.recordSyncFailure(account, err)
 		return ModelSyncStats{}, err
 	}
 	identity, models, err := s.fetchModelsWithFile(ctx, account, file)
@@ -734,11 +762,13 @@ func (s AccountService) syncAccountModelsOnce(accountGuid string) (ModelSyncStat
 		}
 	}
 	if err != nil {
+		s.recordSyncFailure(account, err)
 		ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
 		return ModelSyncStats{}, err
 	}
 	result, err := ModelServiceApp.SyncRemoteModels(account, identity, models)
 	if err != nil {
+		s.recordSyncFailure(account, err)
 		ModelServiceApp.RecordAccountSyncFailure(account.Guid, err)
 		return ModelSyncStats{}, err
 	}
@@ -808,6 +838,7 @@ func (s AccountService) RefreshUsage(guid string) (RefreshUsageResult, error) {
 	defer cancel()
 	file, err := s.ActiveAccountFile(ctx, account, false)
 	if err != nil {
+		s.recordSyncFailure(account, err)
 		return RefreshUsageResult{}, err
 	}
 	usage, err := s.fetchUsageWithFile(ctx, account, file)
@@ -1233,12 +1264,15 @@ func (s AccountService) Reorder(input ReorderAccountInput) error {
 }
 
 func (s AccountService) SetEnabled(guid string, enabled bool) error {
-	account, _ := s.GetByGuid(guid)
+	account, err := s.GetByGuid(guid)
+	if err != nil {
+		return err
+	}
 	status := domains.AccountStatusDisabled
 	if enabled {
-		status = domains.AccountStatusAvailable
+		status = domains.EffectiveAccountStatus(domains.AccountStatusAvailable, account.TokenStatus)
 	}
-	err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
+	err = global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", guid).Updates(map[string]any{
 		"enabled": enabled, "status": status, "health_version": gorm.Expr("health_version + 1"),
 	}).Error
 	if err == nil {
@@ -1264,7 +1298,8 @@ func (s AccountService) MarkUsedIfCurrent(guid string, expectedHealthVersion int
 		status = domains.AccountStatusExhausted
 	}
 	result := global.NAV_DB.Model(&domains.Account{}).
-		Where("guid = ? AND health_version = ?", guid, expectedHealthVersion).
+		Where("guid = ? AND health_version = ? AND (token_status NOT IN ? OR token_status IS NULL OR token_status = '')",
+			guid, expectedHealthVersion, []string{domains.TokenStatusRefreshFailed, domains.TokenStatusInvalid}).
 		Updates(map[string]any{
 			"last_used_at": time.Now().UnixMilli(), "failure_count": 0, "status": status,
 			"cooldown_until": int64(0), "health_version": gorm.Expr("health_version + 1"),
@@ -1369,7 +1404,9 @@ func (s AccountService) FindAvailable(accountGroup, model string, limit int) ([]
 			domains.AccountStatusInvalid, domains.AccountStatusExhausted,
 		}).Where("(status NOT IN ? OR (cooldown_until > 0 AND cooldown_until < ?))", []string{
 		domains.AccountStatusLimited, domains.AccountStatusCooldown,
-	}, now).
+	}, now).Where("(token_status NOT IN ? OR token_status IS NULL OR token_status = '')", []string{
+		domains.TokenStatusRefreshFailed, domains.TokenStatusInvalid,
+	}).
 		Where("(subscription_expired_at = 0 OR subscription_expired_at > ? OR subscription_will_renew = ?)", now, true)
 	if accountGroup != "" {
 		query = query.Where("account_group = ?", accountGroup)
@@ -1462,10 +1499,13 @@ func (s AccountService) ActiveAccountFile(ctx context.Context, account domains.A
 			return currentFile, nil
 		}
 		if strings.TrimSpace(currentFile.Tokens.RefreshToken) == "" {
-			return nil, errors.New("OAuth account does not contain refresh_token")
+			err := errors.New("OAuth account does not contain refresh_token")
+			s.recordTokenRefreshFailure(current, err)
+			return nil, err
 		}
 		httpClient, err := UpstreamHTTPClient()
 		if err != nil {
+			s.recordTokenRefreshFailure(current, err)
 			return nil, err
 		}
 		oauth := codexauth.NewOAuthClient(codexauth.WithIssuer(currentFile.Meta.Issuer), codexauth.WithHTTPClient(httpClient))
@@ -1506,20 +1546,82 @@ func (s AccountService) persistAccountFile(account domains.Account, file *codexa
 }
 
 func (s AccountService) recordTokenRefreshFailure(account domains.Account, err error) {
-	_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+	updates := map[string]any{
 		"token_status": domains.TokenStatusRefreshFailed, "last_error": truncateError(err),
-	}).Error
+		"health_version": gorm.Expr("health_version + 1"),
+	}
+	if isPermanentTokenRefreshFailure(err) {
+		updates["status"] = domains.AccountStatusInvalid
+	} else if account.Status == "" || account.Status == domains.AccountStatusAvailable || account.Status == domains.AccountStatusUnknown {
+		// 网络、超时等暂时性刷新错误不能标记为失效，但也不能继续
+		// 对外显示为可用；下次成功同步后会恢复 available。
+		updates["status"] = domains.AccountStatusUnknown
+	}
+	if err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", account.Guid).Updates(updates).Error; err == nil {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
 }
 
 func (s AccountService) recordSyncFailure(account domains.Account, err error) {
-	_ = global.NAV_DB.Model(&account).Updates(map[string]any{
+	updates := map[string]any{
 		"last_refreshed_at": time.Now().UnixMilli(), "last_error": truncateError(err),
-	}).Error
+		"health_version": gorm.Expr("health_version + 1"),
+	}
+	if isAccountAuthenticationFailure(err) {
+		updates["status"] = domains.AccountStatusInvalid
+		updates["token_status"] = domains.TokenStatusInvalid
+	} else if account.Status == "" || account.Status == domains.AccountStatusAvailable || account.Status == domains.AccountStatusUnknown {
+		updates["status"] = domains.AccountStatusUnknown
+	}
+	if err := global.NAV_DB.Model(&domains.Account{}).Where("guid = ?", account.Guid).Updates(updates).Error; err == nil {
+		AccountGroupServiceApp.RefreshSummaries(account.AccountGroup)
+	}
+}
+
+// isPermanentTokenRefreshFailure 判断刷新令牌是否已明确不可恢复。
+// OAuth 规范通常以 invalid_grant/invalid_token 和 400/401 返回；网络
+// 超时或 5xx 等临时错误则保留 unknown 状态，避免误删或误停账号。
+func isPermanentTokenRefreshFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var oauthErr *codexauth.OAuthError
+	if errors.As(err, &oauthErr) {
+		code := strings.ToLower(strings.TrimSpace(oauthErr.Code))
+		if oauthErr.StatusCode == http.StatusUnauthorized || code == "invalid_grant" || code == "invalid_token" || code == "invalid_refresh_token" {
+			return true
+		}
+		if oauthErr.StatusCode == http.StatusBadRequest && code != "" {
+			return strings.Contains(code, "grant") || strings.Contains(code, "refresh") || strings.Contains(code, "token")
+		}
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "invalid_grant") || strings.Contains(text, "invalid refresh token") ||
+		strings.Contains(text, "could not validate your refresh token") || strings.Contains(text, "refresh token is empty") ||
+		strings.Contains(text, "does not contain refresh_token")
+}
+
+func isAccountAuthenticationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var oauthErr *codexauth.OAuthError
+	if errors.As(err, &oauthErr) && (oauthErr.StatusCode == http.StatusUnauthorized || isPermanentTokenRefreshFailure(err)) {
+		return true
+	}
+	var chatGPTError *chatgpt.APIError
+	if errors.As(err, &chatGPTError) && (chatGPTError.StatusCode == http.StatusUnauthorized || chatGPTError.StatusCode == http.StatusForbidden) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "unauthorized") || strings.Contains(text, "authentication failed") ||
+		strings.Contains(text, "invalid refresh token") || strings.Contains(text, "could not validate your refresh token")
 }
 
 type normalizedAccountMetadata struct {
 	name, email, tokenStatus string
 	accessTokenExpiresAt     int64
+	authSubject              string
 	file                     *codexauth.AccountFile
 }
 
@@ -1542,11 +1644,14 @@ func accountMetadata(file *codexauth.AccountFile) normalizedAccountMetadata {
 			status = domains.TokenStatusRefreshNeeded
 		}
 	}
-	return normalizedAccountMetadata{name: name, email: email, tokenStatus: status, accessTokenExpiresAt: expiresAt, file: file}
+	return normalizedAccountMetadata{
+		name: name, email: email, tokenStatus: status, accessTokenExpiresAt: expiresAt,
+		authSubject: accountOAuthSubject(file), file: file,
+	}
 }
 
 func (m normalizedAccountMetadata) updates() map[string]any {
-	return map[string]any{
+	updates := map[string]any{
 		"email": m.email, "chat_gpt_account_id": m.file.Tokens.AccountID, "workspace_id": m.file.Meta.WorkspaceID,
 		"plan_type": m.file.Meta.PlanType, "subscription_plan": m.file.Meta.SubscriptionPlan,
 		"subscription_expired_at": normalizeUnixMillis(m.file.Meta.SubscriptionExpiresAt),
@@ -1554,6 +1659,43 @@ func (m normalizedAccountMetadata) updates() map[string]any {
 		"subscription_will_renew": m.file.Meta.SubscriptionWillRenew,
 		"access_token_expires_at": m.accessTokenExpiresAt, "token_status": m.tokenStatus,
 	}
+	if m.authSubject != "" {
+		updates["auth_subject"] = m.authSubject
+	}
+	return updates
+}
+
+// accountOAuthSubject 返回 OAuth Token 中稳定的登录主体。ChatGPTAccountID
+// 可能在同一工作区的多个登录用户之间共享，不能单独用于账号去重。
+func accountOAuthSubject(file *codexauth.AccountFile) string {
+	if file == nil {
+		return ""
+	}
+	for _, token := range []string{file.Tokens.IDToken, file.Tokens.AccessToken} {
+		claims, err := codexauth.ParseUnverifiedClaims(token)
+		if err != nil {
+			continue
+		}
+		if subject := strings.TrimSpace(claims.ResolvedUserID()); subject != "" {
+			return subject
+		}
+	}
+	return ""
+}
+
+// accountIdentityKey 用于批量导入文件内去重。保留账号 ID 作为上游路由标识，
+// 再拼接 OAuth 主体以区分同一工作区下的不同登录用户。
+func accountIdentityKey(file *codexauth.AccountFile) string {
+	if file == nil {
+		return ""
+	}
+	return strings.TrimSpace(file.Tokens.AccountID) + "\x00" + accountOAuthSubject(file)
+}
+
+func sameAccountEmail(left, right string) bool {
+	left = strings.ToLower(strings.TrimSpace(left))
+	right = strings.ToLower(strings.TrimSpace(right))
+	return left != "" && right != "" && left == right
 }
 
 func chatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {

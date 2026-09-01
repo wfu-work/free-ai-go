@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/cast"
+	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/free-ai-go/services"
 	"github.com/wfu-work/nav-common-go-lib/global"
 	"github.com/wfu-work/nav-common-go-lib/response"
@@ -234,6 +235,7 @@ func (a AccountApi) GetByGuid(c *gin.Context) {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
+	account.Status = domains.EffectiveAccountStatus(account.Status, account.TokenStatus)
 	response.Ok(account, c)
 }
 

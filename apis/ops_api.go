@@ -31,7 +31,10 @@ func (a OpsApi) Metrics(c *gin.Context) {
 	var models int64
 	var platformKeys int64
 	_ = global.NAV_DB.Model(&domains.Account{}).Count(&accounts).Error
-	_ = global.NAV_DB.Model(&domains.Account{}).Where("enabled = ? AND status = ?", true, domains.AccountStatusAvailable).Count(&availableAccounts).Error
+	_ = global.NAV_DB.Model(&domains.Account{}).
+		Where("enabled = ? AND status = ? AND (token_status NOT IN ? OR token_status IS NULL OR token_status = '')",
+			true, domains.AccountStatusAvailable, []string{domains.TokenStatusRefreshFailed, domains.TokenStatusInvalid}).
+		Count(&availableAccounts).Error
 	_ = global.NAV_DB.Model(&domains.ModelExposure{}).Where("enabled = ?", true).Count(&models).Error
 	_ = global.NAV_DB.Model(&domains.PlatformKey{}).Where("enabled = ?", true).Count(&platformKeys).Error
 	response.Ok(gin.H{
@@ -184,13 +187,17 @@ func (a OpsApi) AccountHealth(c *gin.Context) {
 	items := make([]gin.H, 0, len(accounts))
 	for _, account := range accounts {
 		accountQuotas := quotaByAccount[account.Guid]
-		effectiveStatus := account.Status
+		effectiveStatus := domains.EffectiveAccountStatus(account.Status, account.TokenStatus)
 		if !account.Enabled {
 			effectiveStatus = domains.AccountStatusDisabled
 		} else {
-			if hasBlockingQuotaSnapshot(accountQuotas, now) {
+			if effectiveStatus == domains.AccountStatusInvalid {
+				// 明确失效的 OAuth 凭据优先于额度快照，避免把无效账号
+				// 显示成“额度耗尽”而掩盖真正原因。
+			} else if hasBlockingQuotaSnapshot(accountQuotas, now) {
 				effectiveStatus = domains.AccountStatusExhausted
-			} else if effectiveStatus == "" || effectiveStatus == domains.AccountStatusUnknown {
+			} else if effectiveStatus == "" ||
+				(effectiveStatus == domains.AccountStatusUnknown && !domains.AccountTokenBlocksRouting(account.TokenStatus)) {
 				effectiveStatus = domains.AccountStatusAvailable
 			}
 		}

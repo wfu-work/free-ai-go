@@ -10,6 +10,7 @@ type Account struct {
 	Name                  string `json:"name" gorm:"size:100;comment:账号名称"`
 	Email                 string `json:"email" gorm:"size:255;index;comment:邮箱"`
 	ChatGPTAccountID      string `json:"chatgptAccountId" gorm:"size:120;index;comment:ChatGPT账号ID"`
+	AuthSubject           string `json:"authSubject,omitempty" gorm:"size:255;index;comment:OAuth登录主体"`
 	WorkspaceID           string `json:"workspaceId" gorm:"size:120;index;comment:工作区ID"`
 	EncryptedAccountFile  string `json:"-" gorm:"comment:加密OAuth账号文件"`
 	EncryptedAPIKey       string `json:"-" gorm:"comment:加密OpenAI API Key"`
