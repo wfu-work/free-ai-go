@@ -28,6 +28,35 @@ import (
 type AccountService struct{}
 
 var AccountServiceApp = AccountService{}
+
+// AccountAvailabilityReason 是账号没有进入路由候选集时的稳定分类。
+// 这些值会写入诊断信息和管理端模型账号详情，便于区分凭据、额度和配置问题。
+const (
+	AvailabilityAvailable           = "available"
+	AvailabilityDisabled            = "disabled"
+	AvailabilityCredentialMissing   = "credential_missing"
+	AvailabilityInvalidCredential   = "invalid_credential"
+	AvailabilitySubscriptionExpired = "subscription_expired"
+	AvailabilityCooldown            = "cooldown"
+	AvailabilityQuotaExhausted      = "quota_exhausted"
+	AvailabilityModelUnavailable    = "model_unavailable"
+	AvailabilityGroupMismatch       = "account_group_mismatch"
+)
+
+type AccountAvailability struct {
+	Account  domains.Account
+	Routable bool
+	Reason   string
+	RetryAt  int64
+}
+
+type AccountAvailabilityReport struct {
+	Items       []AccountAvailability
+	Eligible    []domains.Account
+	ReasonCount map[string]int
+	NextRetryAt int64
+}
+
 var accountTokenRefreshGroup singleflight.Group
 var accountModelSyncGroup singleflight.Group
 
@@ -1399,59 +1428,100 @@ func (s AccountService) MarkExpiredSubscriptions() error {
 		Update("status", domains.AccountStatusExpired).Error
 }
 
-func (s AccountService) FindAvailable(accountGroup, model string, limit int) ([]domains.Account, error) {
+func (s AccountService) FindAvailable(accountGroup, _ string, limit int) ([]domains.Account, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	now := time.Now().UnixMilli()
-	query := global.NAV_DB.Where("enabled = ? AND ((credential_type = ? AND encrypted_account_file <> ?) OR (credential_type = ? AND encrypted_api_key <> ?)) AND status NOT IN ?",
-		true, domains.CredentialOAuth, "", domains.CredentialAPIKey, "", []string{
-			domains.AccountStatusDisabled, domains.AccountStatusExpired,
-			domains.AccountStatusInvalid, domains.AccountStatusExhausted,
-		}).Where("(status NOT IN ? OR (cooldown_until > 0 AND cooldown_until < ?))", []string{
-		domains.AccountStatusLimited, domains.AccountStatusCooldown,
-	}, now).Where("(token_status NOT IN ? OR token_status IS NULL OR token_status = '')", []string{
-		domains.TokenStatusRefreshFailed, domains.TokenStatusInvalid,
-	}).
-		Where("(subscription_expired_at = 0 OR subscription_expired_at > ? OR subscription_will_renew = ?)", now, true)
+	report, err := s.AssessAvailability(accountGroup)
+	if err != nil {
+		return nil, err
+	}
+	if len(report.Eligible) > limit {
+		return report.Eligible[:limit], nil
+	}
+	return report.Eligible, nil
+}
+
+// AssessAvailability 使用与路由一致的规则评估账号池，并一次性读取额度快照。
+// model 参数不参与账号健康判断，模型能力关系由 RouterService 在第二阶段求交集。
+func (s AccountService) AssessAvailability(accountGroup string) (AccountAvailabilityReport, error) {
+	var accounts []domains.Account
+	query := global.NAV_DB.Order("priority asc, last_used_at asc, id asc")
 	if accountGroup != "" {
 		query = query.Where("account_group = ?", accountGroup)
 	}
-	// Quota filtering happens after the account query. Scan in batches so a
-	// large number of quota-blocked accounts at the front of the priority
-	// order cannot hide healthy accounts after the first 100 rows.
-	available := make([]domains.Account, 0, limit)
-	offset := 0
-	for len(available) < limit {
-		batchLimit := limit - len(available)
-		if batchLimit > 100 {
-			batchLimit = 100
-		}
-		var list []domains.Account
-		if err := query.Order("priority asc, last_used_at asc, id asc").Offset(offset).Limit(batchLimit).Find(&list).Error; err != nil {
-			return nil, err
-		}
-		if len(list) == 0 {
-			break
-		}
-		for _, account := range list {
-			blocked, err := QuotaServiceApp.HasBlockingQuota(account.Guid)
-			if err != nil {
-				return nil, err
-			}
-			if !blocked {
-				available = append(available, account)
-				if len(available) == limit {
-					break
-				}
-			}
-		}
-		offset += len(list)
-		if len(list) < batchLimit {
-			break
-		}
+	if err := query.Find(&accounts).Error; err != nil {
+		return AccountAvailabilityReport{}, err
 	}
-	return available, nil
+	guids := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		guids = append(guids, account.Guid)
+	}
+	quotaBlocks, err := QuotaServiceApp.BlockingQuotas(guids)
+	if err != nil {
+		return AccountAvailabilityReport{}, err
+	}
+	report := AccountAvailabilityReport{
+		Items:       make([]AccountAvailability, 0, len(accounts)),
+		Eligible:    make([]domains.Account, 0, len(accounts)),
+		ReasonCount: make(map[string]int),
+	}
+	now := time.Now().UnixMilli()
+	for _, account := range accounts {
+		reason, retryAt := accountAvailabilityReason(account, now)
+		if block, ok := quotaBlocks[account.Guid]; ok && block.Blocked {
+			if reason == "" || reason == AvailabilityQuotaExhausted {
+				reason, retryAt = AvailabilityQuotaExhausted, block.RetryAt
+			}
+		}
+		if reason == "" {
+			reason = AvailabilityAvailable
+			report.Eligible = append(report.Eligible, account)
+		} else if retryAt > 0 && (report.NextRetryAt == 0 || retryAt < report.NextRetryAt) {
+			report.NextRetryAt = retryAt
+		}
+		report.ReasonCount[reason]++
+		report.Items = append(report.Items, AccountAvailability{
+			Account: account, Routable: reason == AvailabilityAvailable,
+			Reason: reason, RetryAt: retryAt,
+		})
+	}
+	return report, nil
+}
+
+func accountAvailabilityReason(account domains.Account, now int64) (string, int64) {
+	if !account.Enabled {
+		return AvailabilityDisabled, 0
+	}
+	if (account.CredentialType != domains.CredentialOAuth && account.CredentialType != domains.CredentialAPIKey) ||
+		(account.CredentialType == domains.CredentialOAuth && strings.TrimSpace(account.EncryptedAccountFile) == "") ||
+		(account.CredentialType == domains.CredentialAPIKey && strings.TrimSpace(account.EncryptedAPIKey) == "") {
+		return AvailabilityCredentialMissing, 0
+	}
+	status := domains.EffectiveAccountStatus(account.Status, account.TokenStatus)
+	if status == domains.AccountStatusDisabled {
+		return AvailabilityDisabled, 0
+	}
+	if domains.AccountTokenBlocksRouting(account.TokenStatus) || status == domains.AccountStatusInvalid {
+		return AvailabilityInvalidCredential, 0
+	}
+	switch status {
+	case domains.AccountStatusExpired:
+		return AvailabilitySubscriptionExpired, 0
+	case domains.AccountStatusExhausted:
+		return AvailabilityQuotaExhausted, 0
+	case domains.AccountStatusLimited, domains.AccountStatusCooldown:
+		if account.CooldownUntil <= 0 || account.CooldownUntil > now {
+			return AvailabilityCooldown, account.CooldownUntil
+		}
+		// A stale limited/cooldown status whose timer has elapsed is eligible
+		// immediately; the scheduled recovery task will normalize the row later.
+	}
+	if account.SubscriptionExpiredAt != 0 && account.SubscriptionExpiredAt <= now &&
+		(account.SubscriptionWillRenew == nil || !*account.SubscriptionWillRenew) {
+		return AvailabilitySubscriptionExpired, 0
+	}
+	return "", 0
 }
 
 // LoadAccountFile 解密并解析账号的规范 OAuth 文件。

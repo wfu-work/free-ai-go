@@ -298,10 +298,75 @@ func (s QuotaService) HasBlockingQuota(accountGuid string) (bool, error) {
 	if err := global.NAV_DB.Where("account_guid = ? AND (reset_at = 0 OR reset_at > ?)", accountGuid, now).Find(&quotas).Error; err != nil {
 		return false, err
 	}
-	if quotaSetBlocksRouting(quotas, now) {
-		return true, nil
+	blocked, _ := quotaBlockDetails(quotas, now)
+	return blocked, nil
+}
+
+// QuotaBlock describes the current quota state used by account routing.
+// RetryAt is the earliest reset time of a blocking window, when known.
+type QuotaBlock struct {
+	Blocked bool
+	RetryAt int64
+}
+
+// BlockingQuotas 批量读取账号额度，避免路由候选逐账号查询产生 N+1 次数据库访问。
+func (s QuotaService) BlockingQuotas(accountGuids []string) (map[string]QuotaBlock, error) {
+	result := make(map[string]QuotaBlock, len(accountGuids))
+	if len(accountGuids) == 0 {
+		return result, nil
 	}
-	return false, nil
+	now := time.Now().UnixMilli()
+	var quotas []domains.AccountQuota
+	if err := global.NAV_DB.Where("account_guid IN ? AND (reset_at = 0 OR reset_at > ?)", accountGuids, now).Find(&quotas).Error; err != nil {
+		return nil, err
+	}
+	byAccount := make(map[string][]domains.AccountQuota, len(accountGuids))
+	for _, quota := range quotas {
+		byAccount[quota.AccountGuid] = append(byAccount[quota.AccountGuid], quota)
+	}
+	for _, guid := range accountGuids {
+		items := byAccount[guid]
+		if len(items) == 0 {
+			continue
+		}
+		blocked, retryAt := quotaBlockDetails(items, now)
+		if blocked {
+			result[guid] = QuotaBlock{Blocked: true, RetryAt: retryAt}
+		}
+	}
+	return result, nil
+}
+
+func quotaBlockDetails(quotas []domains.AccountQuota, now int64) (bool, int64) {
+	officialWindows := make(map[string]struct{})
+	for _, quota := range quotas {
+		if strings.EqualFold(strings.TrimSpace(quota.Source), "wham") {
+			officialWindows[quotaWindowIdentity(quota)] = struct{}{}
+		}
+	}
+	var retryAt int64
+	blocked := false
+	for _, quota := range quotas {
+		source := strings.ToLower(strings.TrimSpace(quota.Source))
+		if source != "" && source != "wham" {
+			if _, official := officialWindows[quotaWindowIdentity(quota)]; official {
+				continue
+			}
+		}
+		if !quotaBlocksRouting(quota, now) {
+			continue
+		}
+		blocked = true
+		if quota.ResetAt > now && (retryAt == 0 || quota.ResetAt < retryAt) {
+			retryAt = quota.ResetAt
+		}
+		if quota.ResetAt <= 0 {
+			// A zero reset means the provider did not give a recovery time.
+			// Keep the account blocked but do not invent a Retry-After value.
+			retryAt = 0
+		}
+	}
+	return blocked, retryAt
 }
 
 // quotaSetBlocksRouting prefers an official wham snapshot for the same

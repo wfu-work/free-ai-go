@@ -49,6 +49,8 @@ type NoAvailableAccountError struct {
 	EligibleAccountCount int
 	ModelAvailableCount  int
 	MatchedAccountCount  int
+	AvailabilityReasons  map[string]int
+	NextRetryAt          int64
 }
 
 func (e *NoAvailableAccountError) Error() string {
@@ -59,10 +61,38 @@ func (e *NoAvailableAccountError) Summary() string {
 	if e == nil {
 		return domains.ErrorNoAvailableAccount
 	}
+	reasons := make([]string, 0, len(e.AvailabilityReasons))
+	for reason, count := range e.AvailabilityReasons {
+		reasons = append(reasons, fmt.Sprintf("%s=%d", reason, count))
+	}
+	sort.Strings(reasons)
+	extra := ""
+	if len(reasons) > 0 {
+		extra += fmt.Sprintf(" reasons=%s", strings.Join(reasons, ","))
+	}
+	if e.NextRetryAt > 0 {
+		extra += fmt.Sprintf(" next_retry_at=%d", e.NextRetryAt)
+	}
 	return fmt.Sprintf(
-		"no available account matched model %q (upstream=%q catalog=%q account_group=%q eligible=%d model_available=%d matched=%d)",
-		e.ModelName, e.UpstreamModel, e.CatalogGuid, e.AccountGroup, e.EligibleAccountCount, e.ModelAvailableCount, e.MatchedAccountCount,
+		"no available account matched model %q (upstream=%q catalog=%q account_group=%q eligible=%d model_available=%d matched=%d%s)",
+		e.ModelName, e.UpstreamModel, e.CatalogGuid, e.AccountGroup, e.EligibleAccountCount, e.ModelAvailableCount, e.MatchedAccountCount, extra,
 	)
+}
+
+// RetryAfterSeconds returns a bounded Retry-After value for the earliest
+// known quota/cooldown recovery time. Zero means no recovery time is known.
+func (e *NoAvailableAccountError) RetryAfterSeconds(now time.Time) int {
+	if e == nil || e.NextRetryAt <= 0 {
+		return 0
+	}
+	seconds := int((e.NextRetryAt - now.UnixMilli() + 999) / 1000)
+	if seconds < 1 {
+		seconds = 1
+	}
+	if seconds > 3600 {
+		seconds = 3600
+	}
+	return seconds
 }
 
 func (s RouterService) Select(modelName string) (RouteSelection, error) {
@@ -79,15 +109,15 @@ func (s RouterService) HasAvailableAccount(model RoutedModel, key domains.Platfo
 	if key.AccountGroupFilter != "" {
 		accountGroup = key.AccountGroupFilter
 	}
-	accounts, err := AccountServiceApp.FindAvailable(accountGroup, model.UpstreamModel, 100)
-	if err != nil || len(accounts) == 0 {
+	assessment, err := AccountServiceApp.AssessAvailability(accountGroup)
+	if err != nil || len(assessment.Eligible) == 0 {
 		return false
 	}
 	availableGuids, err := ModelServiceApp.AvailableAccountGuids(model.CatalogGuid)
 	if err != nil {
 		return false
 	}
-	for _, account := range accounts {
+	for _, account := range assessment.Eligible {
 		if availableGuids[account.Guid] {
 			return true
 		}
@@ -108,7 +138,7 @@ func (s RouterService) SelectForKeyWithAffinity(modelName string, excluded map[s
 	if key.AccountGroupFilter != "" {
 		accountGroup = key.AccountGroupFilter
 	}
-	accounts, err := AccountServiceApp.FindAvailable(accountGroup, model.UpstreamModel, 100)
+	assessment, err := AccountServiceApp.AssessAvailability(accountGroup)
 	if err != nil {
 		return RouteSelection{}, err
 	}
@@ -116,8 +146,8 @@ func (s RouterService) SelectForKeyWithAffinity(modelName string, excluded map[s
 	if err != nil {
 		return RouteSelection{}, err
 	}
-	candidates := make([]domains.Account, 0, len(accounts))
-	for _, account := range accounts {
+	candidates := make([]domains.Account, 0, len(assessment.Eligible))
+	for _, account := range assessment.Eligible {
 		if excluded != nil && excluded[account.Guid] {
 			continue
 		}
@@ -126,10 +156,33 @@ func (s RouterService) SelectForKeyWithAffinity(modelName string, excluded map[s
 		}
 	}
 	if len(candidates) == 0 {
+		reasons := make(map[string]int)
+		var nextRetryAt int64
+		for _, item := range assessment.Items {
+			if !availableGuids[item.Account.Guid] {
+				continue
+			}
+			reason := item.Reason
+			if reason == "" {
+				reason = AvailabilityAvailable
+			}
+			reasons[reason]++
+			if item.RetryAt > 0 && (nextRetryAt == 0 || item.RetryAt < nextRetryAt) {
+				nextRetryAt = item.RetryAt
+			}
+		}
+		if len(reasons) == 0 && len(availableGuids) > 0 {
+			reasons[AvailabilityGroupMismatch] = len(availableGuids)
+		}
+		if len(reasons) == 0 {
+			reasons = assessment.ReasonCount
+			nextRetryAt = assessment.NextRetryAt
+		}
 		return RouteSelection{}, &NoAvailableAccountError{
 			ModelName: modelName, UpstreamModel: model.UpstreamModel, CatalogGuid: model.CatalogGuid,
-			AccountGroup: accountGroup, EligibleAccountCount: len(accounts),
+			AccountGroup: accountGroup, EligibleAccountCount: len(assessment.Eligible),
 			ModelAvailableCount: len(availableGuids), MatchedAccountCount: len(candidates),
+			AvailabilityReasons: reasons, NextRetryAt: nextRetryAt,
 		}
 	}
 	strategy := Config().RoutingStrategy

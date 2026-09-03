@@ -21,37 +21,41 @@ var ModelServiceApp = ModelService{}
 
 // ModelCatalogItem 是管理端使用的模型目录聚合视图。
 type ModelCatalogItem struct {
-	Guid                   string           `json:"guid"`
-	CreateTime             int64            `json:"createTime"`
-	UpdateTime             int64            `json:"updateTime"`
-	VendorCode             string           `json:"vendorCode"`
-	ProductCode            string           `json:"productCode"`
-	UpstreamProtocol       string           `json:"upstreamProtocol"`
-	RemoteModelID          string           `json:"remoteModelId"`
-	DisplayName            string           `json:"displayName"`
-	Description            string           `json:"description"`
-	OwnedBy                string           `json:"ownedBy"`
-	CapabilitiesJSON       string           `json:"capabilitiesJson"`
-	ReasoningEfforts       []string         `json:"reasoningEfforts"`
-	DefaultReasoningEffort string           `json:"defaultReasoningEffort"`
-	Source                 string           `json:"source"`
-	RemoteCreatedAt        int64            `json:"remoteCreatedAt"`
-	FirstSeenAt            int64            `json:"firstSeenAt"`
-	LastSeenAt             int64            `json:"lastSeenAt"`
-	Deprecated             bool             `json:"deprecated"`
-	ExposureGuid           string           `json:"exposureGuid"`
-	PublicModel            string           `json:"publicModel"`
-	Aliases                string           `json:"aliases"`
-	AccountGroup           string           `json:"accountGroup"`
-	TimeoutSec             int              `json:"timeoutSec"`
-	Enabled                bool             `json:"enabled"`
-	Visible                bool             `json:"visible"`
-	AvailableAccountCount  int64            `json:"availableAccountCount"`
-	Pricing                []ModelPriceItem `json:"pricing"`
-	PricingUpdatedAt       int64            `json:"pricingUpdatedAt"`
-	PricingSourceURL       string           `json:"pricingSourceUrl"`
-	PricingSourceKind      string           `json:"pricingSourceKind"`
-	PricingSourceVersion   string           `json:"pricingSourceVersion,omitempty"`
+	Guid                   string   `json:"guid"`
+	CreateTime             int64    `json:"createTime"`
+	UpdateTime             int64    `json:"updateTime"`
+	VendorCode             string   `json:"vendorCode"`
+	ProductCode            string   `json:"productCode"`
+	UpstreamProtocol       string   `json:"upstreamProtocol"`
+	RemoteModelID          string   `json:"remoteModelId"`
+	DisplayName            string   `json:"displayName"`
+	Description            string   `json:"description"`
+	OwnedBy                string   `json:"ownedBy"`
+	CapabilitiesJSON       string   `json:"capabilitiesJson"`
+	ReasoningEfforts       []string `json:"reasoningEfforts"`
+	DefaultReasoningEffort string   `json:"defaultReasoningEffort"`
+	Source                 string   `json:"source"`
+	RemoteCreatedAt        int64    `json:"remoteCreatedAt"`
+	FirstSeenAt            int64    `json:"firstSeenAt"`
+	LastSeenAt             int64    `json:"lastSeenAt"`
+	Deprecated             bool     `json:"deprecated"`
+	ExposureGuid           string   `json:"exposureGuid"`
+	PublicModel            string   `json:"publicModel"`
+	Aliases                string   `json:"aliases"`
+	AccountGroup           string   `json:"accountGroup"`
+	TimeoutSec             int      `json:"timeoutSec"`
+	Enabled                bool     `json:"enabled"`
+	Visible                bool     `json:"visible"`
+	// AvailableAccountCount 保持历史字段兼容，但现在表示实时可路由账号数。
+	AvailableAccountCount int64 `json:"availableAccountCount"`
+	// ModelAvailableAccountCount 表示最近一次模型同步确认支持该模型的账号数。
+	ModelAvailableAccountCount int64            `json:"modelAvailableAccountCount"`
+	RoutableAccountCount       int64            `json:"routableAccountCount"`
+	Pricing                    []ModelPriceItem `json:"pricing"`
+	PricingUpdatedAt           int64            `json:"pricingUpdatedAt"`
+	PricingSourceURL           string           `json:"pricingSourceUrl"`
+	PricingSourceKind          string           `json:"pricingSourceKind"`
+	PricingSourceVersion       string           `json:"pricingSourceVersion,omitempty"`
 }
 
 // ModelPriceItem 是模型目录返回给管理端的单条官方 API 参考价。
@@ -111,16 +115,20 @@ type ModelSyncStats struct {
 
 // ModelAccountItem 描述模型与账号池的可用性关系。
 type ModelAccountItem struct {
-	AccountGuid  string `json:"accountGuid"`
-	Name         string `json:"name"`
-	Email        string `json:"email"`
-	AccountGroup string `json:"accountGroup"`
-	Status       string `json:"status"`
-	Enabled      bool   `json:"enabled"`
-	Available    bool   `json:"available"`
-	FirstSeenAt  int64  `json:"firstSeenAt"`
-	LastSeenAt   int64  `json:"lastSeenAt"`
-	LastError    string `json:"lastError,omitempty"`
+	AccountGuid        string `json:"accountGuid"`
+	Name               string `json:"name"`
+	Email              string `json:"email"`
+	AccountGroup       string `json:"accountGroup"`
+	Status             string `json:"status"`
+	TokenStatus        string `json:"tokenStatus"`
+	Enabled            bool   `json:"enabled"`
+	Available          bool   `json:"available"`
+	Routable           bool   `json:"routable"`
+	AvailabilityReason string `json:"availabilityReason,omitempty"`
+	RetryAt            int64  `json:"retryAt,omitempty"`
+	FirstSeenAt        int64  `json:"firstSeenAt"`
+	LastSeenAt         int64  `json:"lastSeenAt"`
+	LastError          string `json:"lastError,omitempty"`
 }
 
 // List 分页查询模型目录，并附加对外策略和可用账号数量。
@@ -475,6 +483,7 @@ func (s ModelService) Accounts(modelCatalogGuid string) ([]ModelAccountItem, err
 		Email        string
 		AccountGroup string
 		Status       string
+		TokenStatus  string
 		Enabled      bool
 		Available    bool
 		FirstSeenAt  int64
@@ -483,18 +492,56 @@ func (s ModelService) Accounts(modelCatalogGuid string) ([]ModelAccountItem, err
 	}
 	var rows []row
 	err := global.NAV_DB.Table("fmg_account_model AS relation").
-		Select("relation.account_guid, account.name, account.email, account.account_group, account.status, account.enabled, relation.available, relation.first_seen_at, relation.last_seen_at, relation.last_error").
+		Select("relation.account_guid, account.name, account.email, account.account_group, account.status, account.token_status, account.enabled, relation.available, relation.first_seen_at, relation.last_seen_at, relation.last_error").
 		Joins("JOIN fmg_account AS account ON account.guid = relation.account_guid AND account.deleted_time IS NULL").
 		Where("relation.model_catalog_guid = ? AND relation.deleted_time IS NULL", modelCatalogGuid).
 		Order("relation.available desc, account.priority asc, account.id asc").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
+	var exposure domains.ModelExposure
+	exposureErr := global.NAV_DB.Where("model_catalog_guid = ?", modelCatalogGuid).First(&exposure).Error
+	if exposureErr != nil && !errors.Is(exposureErr, gorm.ErrRecordNotFound) {
+		return nil, exposureErr
+	}
+	assessment, err := AccountServiceApp.AssessAvailability(exposure.AccountGroup)
+	if err != nil {
+		return nil, err
+	}
+	byGuid := make(map[string]AccountAvailability, len(assessment.Items))
+	for _, availability := range assessment.Items {
+		byGuid[availability.Account.Guid] = availability
+	}
 	items := make([]ModelAccountItem, 0, len(rows))
 	for _, item := range rows {
+		availability := byGuid[item.AccountGuid]
+		routable := item.Available && availability.Routable
+		reason := availability.Reason
+		if reason == "" && !item.Available {
+			reason = AvailabilityModelUnavailable
+		} else if reason == "" && availability.Account.Guid == "" {
+			reason = AvailabilityGroupMismatch
+		}
+		status := domains.EffectiveAccountStatus(item.Status, item.TokenStatus)
+		// Keep the legacy status field useful for existing management UIs while
+		// exposing the precise reason in AvailabilityReason for newer clients.
+		switch reason {
+		case AvailabilityInvalidCredential, AvailabilityCredentialMissing:
+			status = domains.AccountStatusInvalid
+		case AvailabilitySubscriptionExpired:
+			status = domains.AccountStatusExpired
+		case AvailabilityCooldown:
+			status = domains.AccountStatusCooldown
+		case AvailabilityQuotaExhausted:
+			status = domains.AccountStatusExhausted
+		case AvailabilityDisabled:
+			status = domains.AccountStatusDisabled
+		}
 		items = append(items, ModelAccountItem{
 			AccountGuid: item.AccountGuid, Name: item.Name, Email: item.Email, AccountGroup: item.AccountGroup,
-			Status: item.Status, Enabled: item.Enabled, Available: item.Available,
+			Status: status, TokenStatus: item.TokenStatus,
+			Enabled: item.Enabled, Available: item.Available, Routable: routable,
+			AvailabilityReason: reason, RetryAt: availability.RetryAt,
 			FirstSeenAt: item.FirstSeenAt, LastSeenAt: item.LastSeenAt, LastError: item.LastError,
 		})
 	}
@@ -518,22 +565,52 @@ func (s ModelService) attachCatalogState(catalogs []domains.ModelCatalog) ([]Mod
 	for _, exposure := range exposures {
 		exposureByCatalog[exposure.ModelCatalogGuid] = exposure
 	}
-	type countRow struct {
+	type relationRow struct {
 		ModelCatalogGuid string
-		Count            int64
+		AccountGuid      string
+		Available        bool
+		AccountEnabled   bool
 	}
-	var counts []countRow
+	var relations []relationRow
 	if err := global.NAV_DB.Table("fmg_account_model AS relation").
-		Select("relation.model_catalog_guid, COUNT(DISTINCT relation.account_guid) AS count").
+		Select("relation.model_catalog_guid, relation.account_guid, relation.available, account.enabled AS account_enabled").
 		Joins("JOIN fmg_account AS account ON account.guid = relation.account_guid AND account.deleted_time IS NULL").
-		Where("relation.deleted_time IS NULL AND relation.available = ? AND account.enabled = ?", true, true).
-		Where("relation.model_catalog_guid IN ?", guids).
-		Group("relation.model_catalog_guid").Scan(&counts).Error; err != nil {
+		Where("relation.deleted_time IS NULL AND relation.model_catalog_guid IN ?", guids).
+		Find(&relations).Error; err != nil {
 		return nil, err
 	}
-	countByCatalog := make(map[string]int64, len(counts))
-	for _, count := range counts {
-		countByCatalog[count.ModelCatalogGuid] = count.Count
+	countByCatalog := make(map[string]int64, len(catalogs))
+	relationsByCatalog := make(map[string][]relationRow, len(catalogs))
+	for _, relation := range relations {
+		relationsByCatalog[relation.ModelCatalogGuid] = append(relationsByCatalog[relation.ModelCatalogGuid], relation)
+		if relation.Available && relation.AccountEnabled {
+			countByCatalog[relation.ModelCatalogGuid]++
+		}
+	}
+	// Evaluate account health once per account group and intersect it with the
+	// model relation. This keeps the UI count consistent with RouterService.
+	routableByCatalog := make(map[string]int64, len(catalogs))
+	assessmentByGroup := make(map[string]AccountAvailabilityReport)
+	eligibleByGroup := make(map[string]map[string]bool)
+	for _, model := range catalogs {
+		exposure := exposureByCatalog[model.Guid]
+		if _, ok := assessmentByGroup[exposure.AccountGroup]; !ok {
+			assessment, assessErr := AccountServiceApp.AssessAvailability(exposure.AccountGroup)
+			if assessErr != nil {
+				return nil, assessErr
+			}
+			assessmentByGroup[exposure.AccountGroup] = assessment
+			eligible := make(map[string]bool, len(assessment.Eligible))
+			for _, account := range assessment.Eligible {
+				eligible[account.Guid] = true
+			}
+			eligibleByGroup[exposure.AccountGroup] = eligible
+		}
+		for _, relation := range relationsByCatalog[model.Guid] {
+			if relation.Available && relation.AccountEnabled && eligibleByGroup[exposure.AccountGroup][relation.AccountGuid] {
+				routableByCatalog[model.Guid]++
+			}
+		}
 	}
 	pricingByModel, err := loadCatalogPricing(catalogs)
 	if err != nil {
@@ -557,8 +634,11 @@ func (s ModelService) attachCatalogState(catalogs []domains.ModelCatalog) ([]Mod
 			RemoteCreatedAt: model.RemoteCreatedAt, FirstSeenAt: model.FirstSeenAt, LastSeenAt: model.LastSeenAt,
 			Deprecated: model.Deprecated, ExposureGuid: exposure.Guid, PublicModel: exposure.PublicModel,
 			Aliases: exposure.Aliases, AccountGroup: exposure.AccountGroup, TimeoutSec: exposure.TimeoutSec,
-			Enabled: exposure.Enabled, Visible: exposure.Visible, AvailableAccountCount: countByCatalog[model.Guid],
-			Pricing: pricing, PricingUpdatedAt: pricingUpdatedAt, PricingSourceURL: pricingSourceURL,
+			Enabled: exposure.Enabled, Visible: exposure.Visible,
+			AvailableAccountCount:      routableByCatalog[model.Guid],
+			ModelAvailableAccountCount: countByCatalog[model.Guid],
+			RoutableAccountCount:       routableByCatalog[model.Guid],
+			Pricing:                    pricing, PricingUpdatedAt: pricingUpdatedAt, PricingSourceURL: pricingSourceURL,
 			PricingSourceKind: pricingSourceKind, PricingSourceVersion: pricingSourceVersion,
 		})
 	}

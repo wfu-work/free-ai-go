@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -221,13 +222,25 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		if status == http.StatusInternalServerError {
 			message = "internal server error"
 		}
+		var noAvailableErr *services.NoAvailableAccountError
+		if errors.As(err, &noAvailableErr) {
+			message = noAvailableErr.Summary()
+		}
 		if status == http.StatusTooManyRequests {
 			c.Header("Retry-After", "60")
 		}
 		if status == http.StatusServiceUnavailable && c.Writer.Header().Get("Retry-After") == "" {
-			// 本地没有候选账号或上游容量暂时不足时，给下游一个短退避，
-			// 避免同一批请求立即打满所有重试机会。
-			c.Header("Retry-After", "1")
+			// 本地没有候选账号时优先使用最早额度/冷却恢复时间；
+			// 若上游没有提供恢复时间，再给一个短退避，避免立即重试风暴。
+			var noAvailableErr *services.NoAvailableAccountError
+			if errors.As(err, &noAvailableErr) {
+				if seconds := noAvailableErr.RetryAfterSeconds(time.Now()); seconds > 0 {
+					c.Header("Retry-After", strconv.Itoa(seconds))
+				}
+			}
+			if c.Writer.Header().Get("Retry-After") == "" {
+				c.Header("Retry-After", "1")
+			}
 		}
 		c.JSON(status, openAIError(code, message))
 		return
