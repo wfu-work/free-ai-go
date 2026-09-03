@@ -362,7 +362,13 @@ func (s AccountService) upsertOfficialAccount(file *codexauth.AccountFile, pool 
 			// 兼容升级前已有的账号记录：只有邮箱也一致时才回填主体，避免把
 			// 已有账号的 Token 静默替换成同一 Account ID 下的另一个用户。
 			var legacy []domains.Account
-			if err := identityQuery.Where("auth_subject IS NULL OR auth_subject = ''").Find(&legacy).Error; err != nil {
+			// First 返回 record not found 后，GORM 会把错误保留在查询对象上；
+			// 不能复用 identityQuery，否则 Find 会跳过实际查询并直接返回该错误。
+			legacyQuery := global.NAV_DB.Where(
+				"vendor_code = ? AND product_code = ? AND chat_gpt_account_id = ?",
+				vendorCode, productCode, file.Tokens.AccountID,
+			).Where("auth_subject IS NULL OR auth_subject = ''")
+			if err := legacyQuery.Find(&legacy).Error; err != nil {
 				return domains.Account{}, err
 			}
 			if len(legacy) == 1 && sameAccountEmail(legacy[0].Email, metadata.email) {
