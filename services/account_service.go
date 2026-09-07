@@ -62,6 +62,9 @@ var accountModelSyncGroup singleflight.Group
 
 const (
 	tokenRefreshSkew = 2 * time.Minute
+	// The pinned library release predates Astra. Keep the catalog query and
+	// User-Agent aligned until the dependency includes this compatibility version.
+	codexClientVersion = "0.153.1"
 )
 
 type ImportAccountInput struct {
@@ -815,8 +818,7 @@ func (s AccountService) fetchModelsWithFile(ctx context.Context, account domains
 	if err != nil {
 		return catalog.SourceIdentity{}, nil, err
 	}
-	// 客户端兼容版本由 proxy-api-lib 统一维护，业务层不绑定 Codex 私有协议版本。
-	source := client.Codex.CatalogSource(accountRouteID(account, file), "")
+	source := client.Codex.CatalogSource(accountRouteID(account, file), codexClientVersion)
 	models, err := source.ListModels(ctx)
 	return source.Identity(), models, err
 }
@@ -1784,7 +1786,8 @@ func chatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {
 	}
 	return chatgpt.NewClient(
 		chatgpt.WithHTTPClient(httpClient), chatgpt.WithAccessToken(file.Tokens.AccessToken),
-		chatgpt.WithOriginator(GatewayProxyConfig().Originator), chatgpt.WithUserAgent(chatgpt.DefaultUserAgent),
+		chatgpt.WithOriginator(GatewayProxyConfig().Originator),
+		chatgpt.WithUserAgent(chatgpt.DefaultOriginator+"/"+codexClientVersion),
 	), nil
 }
 
