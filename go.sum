@@ -222,6 +222,8 @@ github.com/wfu-work/proxy-api-lib v0.0.0-20260828021016-51855e729aab h1:QQyeuXwZ
 github.com/wfu-work/proxy-api-lib v0.0.0-20260828021016-51855e729aab/go.mod h1:ex7XPbzc9XXrM0cxD82a08HfTqqNFQnO0y78SrWH7i4=
 github.com/wfu-work/proxy-api-lib v0.0.0-20260907120258-8186c47f58ed h1:QEqNPryerLS50c92Izh7miJ35OIPQeMdY8JfIMqbnqg=
 github.com/wfu-work/proxy-api-lib v0.0.0-20260907120258-8186c47f58ed/go.mod h1:ex7XPbzc9XXrM0cxD82a08HfTqqNFQnO0y78SrWH7i4=
+github.com/wfu-work/proxy-api-lib v0.0.0-20260923014125-3b26ff2860e8 h1:iJcC8gPOpHqbbNyfgTPtJ/fsTQNU3OBQ7jKhF7caAxQ=
+github.com/wfu-work/proxy-api-lib v0.0.0-20260923014125-3b26ff2860e8/go.mod h1:ex7XPbzc9XXrM0cxD82a08HfTqqNFQnO0y78SrWH7i4=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=

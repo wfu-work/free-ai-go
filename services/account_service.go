@@ -62,9 +62,9 @@ var accountModelSyncGroup singleflight.Group
 
 const (
 	tokenRefreshSkew = 2 * time.Minute
-	// The pinned library release predates Astra. Keep the catalog query and
-	// User-Agent aligned until the dependency includes this compatibility version.
-	codexClientVersion = "0.153.1"
+	// Keep the catalog query and User-Agent aligned with a recent Codex CLI
+	// release so the server includes newly gated models.
+	codexClientVersion = "0.156.0"
 )
 
 type ImportAccountInput struct {
