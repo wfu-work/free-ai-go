@@ -64,7 +64,7 @@ const (
 	tokenRefreshSkew = 2 * time.Minute
 	// Keep the catalog query and User-Agent aligned with a recent Codex CLI
 	// release so the server includes newly gated models.
-	codexClientVersion = "0.156.0"
+	codexClientVersion = "0.159.2"
 )
 
 type ImportAccountInput struct {
