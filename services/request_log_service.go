@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -89,6 +90,7 @@ type UsageSummary struct {
 }
 
 type RequestLogInput struct {
+	Request           *http.Request
 	RequestID         string
 	Method            string
 	Path              string
@@ -137,6 +139,7 @@ func (s RequestLogService) Record(input RequestLogInput) error {
 		requestID = uuid.NewString()
 	}
 	return global.NAV_DB.Create(&domains.RequestLog{
+		NetworkTrace:      RequestNetworkTrace(input.Request),
 		RequestID:         requestID,
 		Method:            input.Method,
 		Path:              input.Path,
@@ -203,7 +206,7 @@ func (s RequestLogService) List(params map[string]string) (list interface{}, tot
 	}
 	if params["content"] != "" {
 		like := "%" + params["content"] + "%"
-		db = db.Where("request_id LIKE ? OR method LIKE ? OR path LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR error_type LIKE ? OR error_summary LIKE ? OR diagnostic_type LIKE ? OR diagnostic_summary LIKE ? OR account_name LIKE ? OR platform_key LIKE ? OR key_prefix LIKE ?", like, like, like, like, like, like, like, like, like, like, like, like)
+		db = db.Where("request_id LIKE ? OR method LIKE ? OR path LIKE ? OR model LIKE ? OR upstream_model LIKE ? OR error_type LIKE ? OR error_summary LIKE ? OR diagnostic_type LIKE ? OR diagnostic_summary LIKE ? OR account_name LIKE ? OR platform_key LIKE ? OR key_prefix LIKE ? OR network_trace LIKE ?", like, like, like, like, like, like, like, like, like, like, like, like, like)
 	}
 	if err = db.Count(&total).Error; err != nil {
 		return nil, 0, err

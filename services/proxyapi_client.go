@@ -99,6 +99,8 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 	trace := newUpstreamRequestTrace()
 	result, err := client.Codex.Create(trace.context(ctx), accountRouteID(account, file), responseReq)
 	if isChatGPTUnauthorized(err) {
+		unauthorized, _ := apiErrorResult(err, time.Since(start).Milliseconds())
+		trace.networkResult(unauthorized, err)
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
 			client, _ = chatGPTClient(file)
 			preparationMs = time.Since(start).Milliseconds()
@@ -153,6 +155,8 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	trace := newUpstreamRequestTrace()
 	upstream, err := client.Codex.Stream(trace.context(streamCtx), accountRouteID(account, file), responseReq)
 	if isChatGPTUnauthorized(err) {
+		unauthorized, _ := apiErrorResult(err, time.Since(start).Milliseconds())
+		trace.networkResult(unauthorized, err)
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(streamCtx, account, true); refreshErr == nil {
 			client, _ = chatGPTClient(file)
 			preparationMs = time.Since(start).Milliseconds()
@@ -255,6 +259,7 @@ func applyUpstreamTiming(result *ProxyResult, preparationMs int64, trace *upstre
 	if result == nil {
 		return
 	}
+	trace.networkResult(result, nil)
 	timing := trace.snapshot()
 	result.PreparationMs = preparationMs
 	result.DNSMs = timing.DNSMs

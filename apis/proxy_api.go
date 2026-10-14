@@ -48,6 +48,7 @@ func (a ProxyApi) Models(c *gin.Context) {
 			c.Header("Retry-After", "60")
 		}
 		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			Request:      c.Request,
 			RequestID:    requestID,
 			Method:       c.Request.Method,
 			Path:         path,
@@ -63,6 +64,7 @@ func (a ProxyApi) Models(c *gin.Context) {
 	models, err := services.ModelServiceApp.ListEnabled()
 	if err != nil {
 		services.RequestLogServiceApp.Record(services.RequestLogInput{
+			Request:       c.Request,
 			RequestID:     requestID,
 			Method:        c.Request.Method,
 			Path:          path,
@@ -95,6 +97,7 @@ func (a ProxyApi) Models(c *gin.Context) {
 		}
 	}
 	services.RequestLogServiceApp.Record(services.RequestLogInput{
+		Request:       c.Request,
 		RequestID:     requestID,
 		Method:        c.Request.Method,
 		Path:          path,
@@ -379,6 +382,7 @@ func releaseProxyRequestSlot() {
 
 func recordProxyRejection(c *gin.Context, requestID, endpoint string, status int, errorType, errorSummary string, gatewayQueueMs int64) {
 	_ = services.RequestLogServiceApp.Record(services.RequestLogInput{
+		Request:   c.Request,
 		RequestID: requestID, Method: c.Request.Method, Path: endpoint,
 		KeyPrefix:  services.PlatformKeyPrefixFromHeader(c.GetHeader("Authorization")),
 		StatusCode: status, ErrorType: errorType, ErrorSummary: errorSummary,

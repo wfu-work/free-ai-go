@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,6 +28,7 @@ type ProxyIngressTiming struct {
 }
 
 func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, ingress ProxyIngressTiming) (ProxyOutput, error) {
+	r = withRequestNetworkTrace(r)
 	start := time.Now()
 	requestID := strings.TrimSpace(r.Header.Get("X-FreeAi-Request-ID"))
 	logMeta := requestLogMeta(r, endpoint, body)
@@ -46,6 +48,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			errorType = domains.ErrorPlatformKeyLimited
 		}
 		RequestLogServiceApp.Record(RequestLogInput{
+			Request:         r,
 			RequestID:       requestID,
 			Method:          logMeta.Method,
 			Path:            logMeta.Path,
@@ -70,6 +73,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	if modelName == "" {
 		modelErr := errors.New("model is required")
 		RequestLogServiceApp.Record(RequestLogInput{
+			Request:         r,
 			RequestID:       requestID,
 			PlatformKeyID:   platformKey.Guid,
 			PlatformKey:     platformKey.Name,
@@ -94,6 +98,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 				modelErr = findErr
 			}
 			RequestLogServiceApp.Record(RequestLogInput{
+				Request:         r,
 				RequestID:       requestID,
 				PlatformKeyID:   platformKey.Guid,
 				PlatformKey:     platformKey.Name,
@@ -127,6 +132,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			errorType = domains.ErrorInternal
 		}
 		RequestLogServiceApp.Record(RequestLogInput{
+			Request:   r,
 			RequestID: requestID, PlatformKeyID: platformKey.Guid, PlatformKey: platformKey.Name,
 			KeyPrefix: platformKey.KeyPrefix, Method: logMeta.Method, Path: logMeta.Path, Model: modelName,
 			ReasoningEffort: firstNonEmpty(logMeta.ReasoningEffort, platformKey.ReasoningEffort),
@@ -219,6 +225,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			errorSummary = noAvailableErr.Summary()
 		}
 		_ = RequestLogServiceApp.Record(RequestLogInput{
+			Request:         r,
 			RequestID:       requestID,
 			Method:          logMeta.Method,
 			Path:            logMeta.Path,
@@ -307,6 +314,7 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		)
 	}
 	RequestLogServiceApp.Record(RequestLogInput{
+		Request:           r,
 		RequestID:         requestID,
 		Method:            logMeta.Method,
 		Path:              logMeta.Path,
@@ -358,7 +366,10 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 }
 
 func (s ProxyService) callUpstreamAttempt(r *http.Request, w io.Writer, endpoint string, body []byte, stream bool, selection RouteSelection) (result *ProxyResult, output ProxyOutput, err error) {
+	r = r.WithContext(context.WithValue(r.Context(), networkAccountKey, selection.Account))
+	previousTrace := latestNetworkTrace(r.Context())
 	defer func() {
+		finishNetworkAttempt(r.Context(), previousTrace, result, err)
 		RouterServiceApp.ObserveAttempt(selection, result, err)
 	}()
 	return s.callUpstream(r, w, endpoint, body, stream, selection)

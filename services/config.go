@@ -269,6 +269,7 @@ func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
 	upstreamHTTPClientCache.Lock()
 	defer upstreamHTTPClientCache.Unlock()
 	if upstreamHTTPClientCache.client != nil && upstreamHTTPClientCache.proxyURL == proxyURL {
+		scheduleNetworkExitProbe(proxyURL)
 		return upstreamHTTPClientCache.client, nil
 	}
 	client, err := newUpstreamHTTPClient(proxyURL)
@@ -281,6 +282,7 @@ func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
 	upstreamHTTPClientCache.proxyURL = proxyURL
 	upstreamHTTPClientCache.client = client
 	upstreamHTTPClientCache.transport = client.Transport.(*http.Transport)
+	scheduleNetworkExitProbe(proxyURL)
 	return client, nil
 }
 
@@ -299,15 +301,15 @@ func newUpstreamHTTPClient(proxyURL string) (*http.Client, error) {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
+	transport.Proxy = func(r *http.Request) (*url.URL, error) {
+		recordNetworkRoute(r, parsedProxy)
+		return parsedProxy, nil
+	}
 	transport.ForceAttemptHTTP2 = true
 	transport.DisableKeepAlives = false
 	transport.MaxIdleConns = 256
 	transport.MaxIdleConnsPerHost = 128
 	transport.IdleConnTimeout = 90 * time.Second
-	if parsedProxy != nil {
-		transport.Proxy = http.ProxyURL(parsedProxy)
-	}
 	return &http.Client{Transport: transport}, nil
 }
 

@@ -87,6 +87,7 @@ func testUpstreamProxy(ctx context.Context, proxyURL string, probes []upstreamPr
 		})
 	}
 	wg.Wait()
+	rememberNetworkExitIP(proxyURL, result.ExitIP, result.CheckedAt)
 	return result, nil
 }
 
