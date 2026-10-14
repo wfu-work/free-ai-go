@@ -149,6 +149,15 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		}
 	}()
 
+	retryCtx, retryTimeouts := newProxyRetryContext(r.Context())
+	defer func() {
+		retryTimeouts.stop()
+		retryTimeouts.cancel(context.Canceled)
+	}()
+	r = r.WithContext(retryCtx)
+	if stream {
+		w = proxyRetryWriter{Writer: w, timeout: retryTimeouts}
+	}
 	maxAttempts := Config().MaxRetries + 1
 	if maxAttempts <= 0 {
 		maxAttempts = 1
@@ -160,9 +169,30 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 	var lastErr error
 	var lastResult *ProxyResult
 	var lastSelection RouteSelection
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	capacityRetrying := false
+	capacityFailures := 0
+	for attempt := 0; ; {
+		if retryCtx.Err() != nil {
+			lastErr = context.Cause(retryCtx)
+			lastResult, _ = apiErrorResult(lastErr, time.Since(start).Milliseconds())
+			lastOutput = ProxyOutput{StatusCode: lastResult.StatusCode, Header: lastResult.Header, Body: lastResult.Body}
+			break
+		}
 		selection, err := RouterServiceApp.SelectForKeyWithAffinity(modelName, excluded, platformKey, affinityKey)
 		if err != nil {
+			var unavailable *NoAvailableAccountError
+			if capacityRetrying && errors.As(err, &unavailable) {
+				if len(excluded) > 0 {
+					clear(excluded)
+					continue
+				}
+				delay := upstreamRetryDelay(capacityFailures, nil)
+				if until := time.Until(time.UnixMilli(unavailable.NextRetryAt)); unavailable.NextRetryAt > 0 && until > delay {
+					delay = until
+				}
+				waitForUpstreamRetry(retryCtx, delay)
+				continue
+			}
 			if lastSelection.Account.Guid != "" {
 				break
 			}
@@ -174,12 +204,34 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			lastOutput = ProxyOutput{StatusCode: status}
 			break
 		}
+		if lastSelection.Account.Guid != "" && lastSelection.Account.Guid != selection.Account.Guid {
+			reason := "upstream_error"
+			if lastResult != nil && lastResult.ErrorType != "" {
+				reason = lastResult.ErrorType
+			}
+			switchReasons = append(switchReasons, lastSelection.Account.Guid+":"+reason)
+		}
 		lastSelection = selection
+		attempt++
+		attemptOffset := time.Since(start).Milliseconds()
 		excluded[selection.Account.Guid] = true
 		result, output, err := s.callUpstreamAttempt(r, w, endpoint, body, stream, selection)
+		if result != nil {
+			if result.FirstEventMs > 0 {
+				result.FirstEventMs += attemptOffset
+			}
+			if result.FirstTokenMs > 0 {
+				result.FirstTokenMs += attemptOffset
+			}
+		}
 		lastResult = result
 		lastOutput = output
 		lastErr = err
+		if retryCtx.Err() != nil && !(stream && result != nil && result.StreamStarted) {
+			// Prefer the overall deadline/caller cancellation over an SDK error
+			// produced while that cancellation interrupted an in-flight request.
+			continue
+		}
 		attemptErrorType := ""
 		if result != nil {
 			attemptErrorType = result.ErrorType
@@ -203,16 +255,18 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 			_ = AccountServiceApp.MarkUsedIfCurrent(selection.Account.Guid, selection.Account.HealthVersion)
 			break
 		}
-		if !shouldRetry(result, err, stream) || attempt == maxAttempts-1 {
+		if !shouldRetry(result, err, stream) {
 			break
 		}
-		reason := "upstream_error"
-		if attemptErrorType != "" {
-			reason = attemptErrorType
-		} else if err != nil {
-			reason = err.Error()
+		if capacityRetrying || shouldWaitForUpstreamCapacity(result, err, stream) {
+			capacityRetrying = true
+			capacityFailures++
+			waitForUpstreamRetry(retryCtx, upstreamRetryDelay(capacityFailures, output.Header))
+			continue
 		}
-		switchReasons = append(switchReasons, selection.Account.Guid+":"+reason)
+		if attempt >= maxAttempts {
+			break
+		}
 	}
 	if noAvailableAccountBeforeUpstream(lastSelection, lastErr) {
 		// 路由阶段没有候选账号时此前会直接返回，导致管理端只能看到下游
@@ -243,16 +297,6 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		})
 		return lastOutput, lastErr
 	}
-	// Initial overload events stay hidden while another account can be tried.
-	// If routing is exhausted, replay the last real upstream error instead of
-	// completing the request as an empty HTTP 200 stream.
-	if stream && lastResult != nil && !lastResult.StreamStarted && len(lastResult.BufferedStreamBody) > 0 {
-		if replayErr := replayBufferedStreamError(w, lastResult); replayErr != nil {
-			lastErr = replayErr
-			lastResult.ErrorType = classifyDownstreamWriteError(replayErr)
-			lastResult.ErrorSummary = proxyErrorSummary(replayErr)
-		}
-	}
 	statusCode := lastOutput.StatusCode
 	if statusCode == 0 {
 		statusCode = http.StatusBadGateway
@@ -282,7 +326,6 @@ func (s ProxyService) Handle(r *http.Request, w io.Writer, endpoint string, body
 		errorSummary = lastResult.ErrorSummary
 		diagnosticType = lastResult.DiagnosticType
 		diagnosticSummary = lastResult.DiagnosticSummary
-		latencyMs = lastResult.LatencyMs
 		preparationMs = lastResult.PreparationMs
 		dnsMs = lastResult.DNSMs
 		connectMs = lastResult.ConnectMs
@@ -373,20 +416,6 @@ func (s ProxyService) callUpstreamAttempt(r *http.Request, w io.Writer, endpoint
 		RouterServiceApp.ObserveAttempt(selection, result, err)
 	}()
 	return s.callUpstream(r, w, endpoint, body, stream, selection)
-}
-
-func replayBufferedStreamError(w io.Writer, result *ProxyResult) error {
-	if result == nil || result.StreamStarted || len(result.BufferedStreamBody) == 0 {
-		return nil
-	}
-	if _, err := w.Write(result.BufferedStreamBody); err != nil {
-		return err
-	}
-	result.StreamStarted = true
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	return nil
 }
 
 func noAvailableAccountBeforeUpstream(selection RouteSelection, err error) bool {

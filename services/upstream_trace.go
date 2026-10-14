@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"crypto/tls"
+	"net/http"
 	"net/http/httptrace"
 	"sync"
 	"time"
@@ -33,6 +34,36 @@ type upstreamRequestTrace struct {
 	network          []domains.UpstreamNetworkAttempt
 	exitKeys         [][32]byte
 	dnsHost          string
+	responseHeaders  http.Header
+}
+
+// The SDK exposes non-2xx responses as APIError without response headers.
+// Keep only retry and tracing metadata so routing can respect Retry-After.
+func (t *upstreamRequestTrace) recordResponseHeaders(header http.Header) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.responseHeaders = make(http.Header)
+	for _, key := range []string{"Retry-After", "X-Request-ID", "X-Oai-Request-ID"} {
+		if value := header.Get(key); value != "" {
+			t.responseHeaders.Set(key, value)
+		}
+	}
+}
+
+func (t *upstreamRequestTrace) applyResponseHeaders(result *ProxyResult) {
+	if t == nil || result == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if result.Header == nil {
+		result.Header = make(http.Header)
+	}
+	for key, values := range t.responseHeaders {
+		if result.Header.Get(key) == "" {
+			result.Header[key] = append([]string(nil), values...)
+		}
+	}
 }
 
 type upstreamTraceSnapshot struct {

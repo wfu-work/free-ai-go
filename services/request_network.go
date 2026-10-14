@@ -113,8 +113,8 @@ func validSocketAddress(value string) string {
 	return networkIP(value)
 }
 
-// Called by the actual transport's Proxy selector for both direct and proxy
-// requests, so a cached client cannot accidentally report today's config.
+// Called before every actual RoundTrip, including reused HTTP/2 connections.
+// The route is the transport's fixed proxy, never a later config snapshot.
 func recordNetworkRoute(r *http.Request, proxy *url.URL) {
 	trace, ok := r.Context().Value(networkHTTPTraceKey).(*upstreamRequestTrace)
 	if !ok {

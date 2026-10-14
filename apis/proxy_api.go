@@ -203,22 +203,18 @@ func forwardProxy(c *gin.Context, endpoint string) {
 	}
 	out, err := proxyService.Handle(c.Request, c.Writer, endpoint, body, stream, services.ProxyIngressTiming{GatewayQueueMs: gatewayQueueMs})
 	if err != nil {
-		if stream && out.StatusCode >= 200 && out.StatusCode < 300 {
+		if stream && c.Writer.Written() {
 			return
 		}
 		status := out.StatusCode
-		if status == 0 {
+		if status < 400 {
 			status = http.StatusBadGateway
 		}
 		errorType := services.ClassifyProxyError(err)
 		code := proxyErrorCode(status, errorType)
 		// 上游错误也可能携带 Retry-After、请求追踪 ID 等端到端响应头。
 		// 先复制安全响应头，再生成统一错误体，避免下游丢失官方的退避提示。
-		contentType := ""
 		if out.Header != nil {
-			contentType = strings.ToLower(out.Header.Get("Content-Type"))
-		}
-		if out.Header != nil && (!stream || strings.HasPrefix(contentType, "application/json")) {
 			copyProxyResponseHeaders(c.Writer.Header(), out.Header)
 		}
 		message := err.Error()
@@ -229,7 +225,7 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		if errors.As(err, &noAvailableErr) {
 			message = noAvailableErr.Summary()
 		}
-		if status == http.StatusTooManyRequests {
+		if status == http.StatusTooManyRequests && c.Writer.Header().Get("Retry-After") == "" {
 			c.Header("Retry-After", "60")
 		}
 		if status == http.StatusServiceUnavailable && c.Writer.Header().Get("Retry-After") == "" {
@@ -245,6 +241,9 @@ func forwardProxy(c *gin.Context, endpoint string) {
 				c.Header("Retry-After", "1")
 			}
 		}
+		c.Writer.Header().Set("Content-Type", "application/json")
+		c.Writer.Header().Del("Connection")
+		c.Writer.Header().Del("Cache-Control")
 		c.JSON(status, openAIError(code, message))
 		return
 	}
@@ -257,6 +256,9 @@ func forwardProxy(c *gin.Context, endpoint string) {
 		status = http.StatusOK
 	}
 	if stream {
+		if c.Writer.Written() {
+			return
+		}
 		if len(out.Body) > 0 {
 			c.Writer.Header().Set("Content-Type", "application/json")
 			c.Data(status, "application/json", out.Body)
@@ -289,7 +291,12 @@ func proxyErrorCode(status int, errorType string) string {
 	case http.StatusForbidden:
 		return "model_not_supported"
 	case http.StatusTooManyRequests:
-		return "platform_key_limited"
+		if errorType == domains.ErrorPlatformKeyLimited {
+			return errorType
+		}
+		return domains.ErrorRateLimited
+	case http.StatusGatewayTimeout:
+		return domains.ErrorUpstreamTimeout
 	case http.StatusServiceUnavailable:
 		// 503 既可能来自本地路由阶段，也可能是账号上游返回的服务错误。
 		// 只有明确分类为 no_available_account 时才保留该语义，避免把

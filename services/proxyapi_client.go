@@ -36,29 +36,28 @@ type ProxyUsage struct {
 }
 
 type ProxyResult struct {
-	StatusCode         int
-	Header             http.Header
-	Body               []byte
-	BufferedStreamBody []byte
-	Usage              ProxyUsage
-	ErrorType          string
-	ErrorSummary       string
-	DiagnosticType     string
-	DiagnosticSummary  string
-	PreparationMs      int64
-	DNSMs              int64
-	ConnectMs          int64
-	TLSHandshakeMs     int64
-	WroteRequestMs     int64
-	RequestUploadMs    int64
-	UpstreamWaitMs     int64
-	UpstreamHeaderMs   int64
-	FirstEventMs       int64
-	FirstTokenMs       int64
-	LatencyMs          int64
-	ConnectionReused   bool
-	ConnectionTraced   bool
-	StreamStarted      bool
+	StatusCode        int
+	Header            http.Header
+	Body              []byte
+	Usage             ProxyUsage
+	ErrorType         string
+	ErrorSummary      string
+	DiagnosticType    string
+	DiagnosticSummary string
+	PreparationMs     int64
+	DNSMs             int64
+	ConnectMs         int64
+	TLSHandshakeMs    int64
+	WroteRequestMs    int64
+	RequestUploadMs   int64
+	UpstreamWaitMs    int64
+	UpstreamHeaderMs  int64
+	FirstEventMs      int64
+	FirstTokenMs      int64
+	LatencyMs         int64
+	ConnectionReused  bool
+	ConnectionTraced  bool
+	StreamStarted     bool
 }
 
 type ProxyAPIClient interface {
@@ -170,10 +169,15 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		applyUpstreamTiming(proxyResult, preparationMs, trace)
 		return proxyResult, proxyErr
 	}
+	result, err := consumeProxyStream(ctx, streamCtx, streamTimeouts, req, w, upstream, start)
+	applyUpstreamTiming(result, preparationMs, trace)
+	return result, err
+}
+
+func consumeProxyStream(ctx, streamCtx context.Context, streamTimeouts *streamTimeoutController, req ProxyRequest, w io.Writer, upstream *chatgpt.CodexResponseStream, start time.Time) (*ProxyResult, error) {
 	stream := upstream.Stream
 	defer stream.Close()
 	result := &ProxyResult{StatusCode: upstream.StatusCode, Header: upstream.Header.Clone()}
-	applyUpstreamTiming(result, preparationMs, trace)
 	if result.Header == nil {
 		result.Header = make(http.Header)
 	}
@@ -183,42 +187,59 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 	flusher, _ := w.(http.Flusher)
 	terminalEventType := ""
 	responseCompleted := false
+	var pending []openai.StreamEvent
+	pendingBytes := 0
 	for stream.Next() {
 		event := stream.Event()
 		// 首个 SSE 到达后，固定的首响应时限即告结束；此后只在连续
 		// 没有新事件超过空闲时限时取消上游读取。
 		streamTimeouts.noteEvent(req.StreamIdleTimeout)
 		applyContextCompactionDiagnostic(result, streamEventContainsCompaction(event), req.CompactionThreshold)
-		if streamEventErrorType(event.Type) != "" {
-			terminalEventType = event.Type
+		if streamEventErrorType(streamEventType(event)) != "" {
+			terminalEventType = streamEventType(event)
 		}
 		elapsedMs := time.Since(start).Milliseconds()
 		if result.FirstEventMs == 0 {
-			result.FirstEventMs = elapsedMs
+			result.FirstEventMs = max(1, elapsedMs)
 		}
-		if result.FirstTokenMs == 0 && isContentStreamEvent(event) {
-			result.FirstTokenMs = elapsedMs
+		content := isContentStreamEvent(event)
+		if result.FirstTokenMs == 0 && content {
+			result.FirstTokenMs = max(1, elapsedMs)
 		}
-		// 上游可能用 HTTP 200 建立 SSE，随后把过载作为第一个 error 事件。
-		// 此时下游还未看到任何字节，可以安全吞掉该事件并交给路由层切换账号。
-		if !result.StreamStarted && isRetryableInitialOverloadEvent(event) {
-			result.LatencyMs = elapsedMs
-			result.ErrorType = domains.ErrorUpstreamFailed
-			result.ErrorSummary = initialStreamErrorSummary(event)
-			result.BufferedStreamBody = initialStreamErrorBody(req, event)
-			return result, nil
+		// 准备事件不能提前提交 HTTP 200。正文之前的错误由路由层重试；
+		// 成功时按原顺序发送准备事件，正文之后的错误则不能安全重放。
+		if !result.StreamStarted && terminalEventType != "" {
+			return initialStreamErrorResult(result, event, elapsedMs), nil
+		}
+		completed, completedOK := event.CompletedResponse()
+		if !result.StreamStarted && !content && !completedOK {
+			pendingBytes += len(event.Data) + len(event.Type) + 256
+			if pendingBytes > 1<<20 {
+				return apiErrorResult(errors.New("invalid upstream protocol: stream preparation exceeds buffer limit"), elapsedMs)
+			}
+			pending = append(pending, event)
+			continue
 		}
 		result.StreamStarted = true
-		if err := writeStreamEvent(w, req, event); err != nil {
+		pending = append(pending, event)
+		var writeErr error
+		for _, buffered := range pending {
+			if writeErr = writeStreamEvent(w, req, buffered); writeErr != nil {
+				break
+			}
+		}
+		pending = nil
+		pendingBytes = 0
+		if writeErr != nil {
 			result.LatencyMs = time.Since(start).Milliseconds()
-			result.ErrorType = classifyDownstreamWriteError(err)
-			result.ErrorSummary = proxyErrorSummary(err)
-			return result, err
+			result.ErrorType = classifyDownstreamWriteError(writeErr)
+			result.ErrorSummary = proxyErrorSummary(writeErr)
+			return result, writeErr
 		}
 		if flusher != nil {
 			flusher.Flush()
 		}
-		if completed, ok := event.CompletedResponse(); ok {
+		if completedOK {
 			result.Usage = usageFromResponse(completed)
 			responseCompleted = true
 		}
@@ -247,7 +268,6 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		result.ErrorSummary = streamErrorSummary(terminalEventType, streamErr)
 		if !result.StreamStarted {
 			errResult, _ := apiErrorResult(streamErr, result.LatencyMs)
-			applyUpstreamTiming(errResult, preparationMs, trace)
 			return errResult, nil
 		}
 		return result, streamErr
@@ -260,6 +280,7 @@ func applyUpstreamTiming(result *ProxyResult, preparationMs int64, trace *upstre
 		return
 	}
 	trace.networkResult(result, nil)
+	trace.applyResponseHeaders(result)
 	timing := trace.snapshot()
 	result.PreparationMs = preparationMs
 	result.DNSMs = timing.DNSMs
@@ -693,10 +714,18 @@ func apiErrorResult(err error, latencyMs int64) (*ProxyResult, error) {
 	errorType := classifyError(err)
 	var openAIErr *openai.APIError
 	var chatGPTErr *chatgpt.APIError
-	if errors.As(err, &openAIErr) && openAIErr.StatusCode > 0 {
-		status = openAIErr.StatusCode
-	} else if errors.As(err, &chatGPTErr) && chatGPTErr.StatusCode > 0 {
-		status = chatGPTErr.StatusCode
+	if errors.As(err, &openAIErr) {
+		if inferred := upstreamAPIErrorStatus(openAIErr.StatusCode, openAIErr.Code+" "+openAIErr.Type+" "+openAIErr.Message); inferred > 0 {
+			status = inferred
+		}
+	} else if errors.As(err, &chatGPTErr) {
+		if inferred := upstreamAPIErrorStatus(chatGPTErr.StatusCode, chatGPTErr.Code+" "+chatGPTErr.Type+" "+chatGPTErr.Message); inferred > 0 {
+			status = inferred
+		}
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		status = http.StatusGatewayTimeout
+	} else if errors.Is(err, context.Canceled) {
+		status = 499
 	}
 	body, marshalErr := json.Marshal(map[string]any{"error": map[string]any{"message": err.Error(), "type": errorType, "code": errorType}})
 	if marshalErr != nil {
@@ -714,11 +743,13 @@ func classifyError(err error) string {
 	}
 	var openAIErr *openai.APIError
 	if errors.As(err, &openAIErr) {
-		return classifyStatusError(openAIErr.StatusCode, openAIErr.Code+" "+openAIErr.Type+" "+openAIErr.Message)
+		detail := openAIErr.Code + " " + openAIErr.Type + " " + openAIErr.Message
+		return classifyStatusError(upstreamAPIErrorStatus(openAIErr.StatusCode, detail), detail)
 	}
 	var chatGPTErr *chatgpt.APIError
 	if errors.As(err, &chatGPTErr) {
-		return classifyStatusError(chatGPTErr.StatusCode, chatGPTErr.Code+" "+chatGPTErr.Type+" "+chatGPTErr.Message)
+		detail := chatGPTErr.Code + " " + chatGPTErr.Type + " " + chatGPTErr.Message
+		return classifyStatusError(upstreamAPIErrorStatus(chatGPTErr.StatusCode, detail), detail)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return domains.ErrorUpstreamTimeout
@@ -767,18 +798,23 @@ func IsTransientUpstreamCapacityError(result *ProxyResult, err error) bool {
 	if err != nil {
 		var openAIErr *openai.APIError
 		if errors.As(err, &openAIErr) {
-			status = openAIErr.StatusCode
+			if inferred := upstreamAPIErrorStatus(openAIErr.StatusCode, openAIErr.Code+" "+openAIErr.Type+" "+openAIErr.Message); inferred > 0 {
+				status = inferred
+			}
 			parts = append(parts, openAIErr.Code, openAIErr.Type, openAIErr.Message)
 		}
 		var chatGPTErr *chatgpt.APIError
 		if errors.As(err, &chatGPTErr) {
-			status = chatGPTErr.StatusCode
+			if inferred := upstreamAPIErrorStatus(chatGPTErr.StatusCode, chatGPTErr.Code+" "+chatGPTErr.Type+" "+chatGPTErr.Message); inferred > 0 {
+				status = inferred
+			}
 			parts = append(parts, chatGPTErr.Code, chatGPTErr.Type, chatGPTErr.Message)
 		}
 	}
-	// SSE 可能先以 HTTP 200 建立连接，再通过首个 response.failed 事件
-	// 报告容量不足；这类响应同样属于暂态故障。
-	if status != http.StatusServiceUnavailable && (status < 200 || status >= 300) {
+	// Capacity errors may arrive as HTTP 5xx or as a terminal SSE event on a
+	// successful HTTP connection. Authentication and local routing failures
+	// must not acquire the capacity retry policy merely from their message.
+	if status < 200 || (status >= 300 && status < 500) || status >= 600 {
 		return false
 	}
 	text := strings.ToLower(strings.Join(parts, " "))
@@ -839,40 +875,32 @@ func streamEventErrorType(eventType string) string {
 	}
 }
 
-func isRetryableInitialOverloadEvent(event openai.StreamEvent) bool {
-	if streamEventErrorType(event.Type) == "" {
-		return false
+func initialStreamErrorResult(result *ProxyResult, event openai.StreamEvent, latencyMs int64) *ProxyResult {
+	summary := initialStreamErrorSummary(event)
+	status := upstreamAPIErrorStatus(0, string(event.Data))
+	if status == 0 {
+		status = http.StatusBadGateway
 	}
-	var payload struct {
-		Error struct {
-			Code    string `json:"code"`
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
-		Response struct {
-			Error struct {
-				Code    string `json:"code"`
-				Type    string `json:"type"`
-				Message string `json:"message"`
-			} `json:"error"`
-		} `json:"response"`
-		Code    string `json:"code"`
-		Message string `json:"message"`
+	errorType := streamEventErrorType(streamEventType(event))
+	switch status {
+	case http.StatusServiceUnavailable:
+		errorType = domains.ErrorUpstreamFailed
+	case http.StatusTooManyRequests:
+		errorType = domains.ErrorRateLimited
+	case http.StatusBadRequest:
+		errorType = domains.ErrorUpstreamHTTP4xx
+	case http.StatusUnauthorized:
+		errorType = domains.ErrorAuthFailed
 	}
-	if err := json.Unmarshal(event.Data, &payload); err != nil {
-		return false
-	}
-	// Include the raw payload because response.failed may nest the error under
-	// response.error instead of exposing it at the top level.
-	text := strings.ToLower(strings.Join([]string{
-		payload.Error.Code, payload.Error.Type, payload.Error.Message,
-		payload.Response.Error.Code, payload.Response.Error.Type, payload.Response.Error.Message,
-		payload.Code, payload.Message,
-		string(event.Data),
-	}, " "))
-	return strings.Contains(text, "server_is_overloaded") ||
-		strings.Contains(text, "service_unavailable_error") ||
-		strings.Contains(text, "servers are currently overloaded")
+	result.StatusCode = status
+	result.ErrorType = errorType
+	result.ErrorSummary = summary
+	result.LatencyMs = latencyMs
+	result.Header.Set("Content-Type", "application/json")
+	result.Header.Del("Cache-Control")
+	result.Header.Del("Connection")
+	result.Body, _ = json.Marshal(map[string]any{"error": map[string]any{"message": summary, "type": errorType, "code": errorType}})
+	return result
 }
 
 func initialStreamErrorSummary(event openai.StreamEvent) string {
@@ -906,15 +934,6 @@ func initialStreamErrorSummary(event openai.StreamEvent) string {
 	return normalizeErrorSummary(strings.Join(parts, " "))
 }
 
-// initialStreamErrorBody preserves the upstream error while another account
-// is attempted. It is replayed only when routing exhausts all retry options.
-func initialStreamErrorBody(req ProxyRequest, event openai.StreamEvent) []byte {
-	if req.Endpoint == "/v1/chat/completions" {
-		return []byte(fmt.Sprintf("data: %s\n\n", event.Data))
-	}
-	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event.Type, event.Data))
-}
-
 func streamErrorSummary(eventType string, err error) string {
 	summary := proxyErrorSummary(err)
 	if strings.TrimSpace(eventType) == "" {
@@ -926,6 +945,8 @@ func streamErrorSummary(eventType string, err error) string {
 func classifyUnstructuredError(message string) string {
 	text := strings.ToLower(message)
 	switch {
+	case text == domains.ErrorPlatformKeyLimited:
+		return domains.ErrorPlatformKeyLimited
 	case strings.Contains(text, "no_available_account"):
 		return domains.ErrorNoAvailableAccount
 	case strings.Contains(text, "model_not_supported") || strings.Contains(text, "record not found"):
@@ -946,7 +967,7 @@ func classifyUnstructuredError(message string) string {
 		strings.Contains(text, "client disconnected"):
 		return domains.ErrorClientDisconnected
 	case strings.Contains(text, "invalid character") || strings.Contains(text, "cannot unmarshal") ||
-		strings.Contains(text, "invalid json") || strings.Contains(text, "malformed") ||
+		strings.Contains(text, "invalid json") || strings.Contains(text, "invalid upstream protocol") || strings.Contains(text, "malformed") ||
 		strings.Contains(text, "token too long"):
 		return domains.ErrorProtocol
 	case strings.Contains(text, "network") || strings.Contains(text, "connection") ||
@@ -978,6 +999,27 @@ func classifyStatusError(status int, message string) string {
 		return domains.ErrorUpstreamHTTP4xx
 	default:
 		return classifyUnstructuredError(message)
+	}
+}
+
+// Aggregating Codex SSE for a non-stream caller produces APIError with status
+// zero. Recover the error's HTTP meaning instead of losing overload/429 retries.
+func upstreamAPIErrorStatus(status int, detail string) int {
+	if status >= 400 {
+		return status
+	}
+	text := strings.ToLower(detail)
+	switch {
+	case strings.Contains(text, "server_is_overloaded"), strings.Contains(text, "service_unavailable_error"), strings.Contains(text, "servers are currently overloaded"), strings.Contains(text, "no_available_account"):
+		return http.StatusServiceUnavailable
+	case strings.Contains(text, "rate_limit"), strings.Contains(text, "too many requests"), strings.Contains(text, "rate limit"):
+		return http.StatusTooManyRequests
+	case strings.Contains(text, "invalid_request"), strings.Contains(text, "invalid_argument"):
+		return http.StatusBadRequest
+	case strings.Contains(text, "invalid_api_key"), strings.Contains(text, "authentication_error"):
+		return http.StatusUnauthorized
+	default:
+		return 0
 	}
 }
 

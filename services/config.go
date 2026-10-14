@@ -281,7 +281,7 @@ func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
 	}
 	upstreamHTTPClientCache.proxyURL = proxyURL
 	upstreamHTTPClientCache.client = client
-	upstreamHTTPClientCache.transport = client.Transport.(*http.Transport)
+	upstreamHTTPClientCache.transport = client.Transport.(*upstreamProxyTransport).transport
 	scheduleNetworkExitProbe(proxyURL)
 	return client, nil
 }
@@ -301,16 +301,15 @@ func newUpstreamHTTPClient(proxyURL string) (*http.Client, error) {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = func(r *http.Request) (*url.URL, error) {
-		recordNetworkRoute(r, parsedProxy)
-		return parsedProxy, nil
-	}
+	// Explicit routing ignores HTTP_PROXY/NO_PROXY and never falls back to a
+	// direct connection when the configured proxy fails.
+	transport.Proxy = http.ProxyURL(parsedProxy)
 	transport.ForceAttemptHTTP2 = true
 	transport.DisableKeepAlives = false
 	transport.MaxIdleConns = 256
 	transport.MaxIdleConnsPerHost = 128
 	transport.IdleConnTimeout = 90 * time.Second
-	return &http.Client{Transport: transport}, nil
+	return &http.Client{Transport: &upstreamProxyTransport{transport: transport, proxy: parsedProxy}}, nil
 }
 
 func GatewayProxyConfig() GatewayProxyConfigInput {

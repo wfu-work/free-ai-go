@@ -1,6 +1,9 @@
 package apis
 
 import (
+	"io"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/wfu-work/free-ai-go/services"
 	commonDomains "github.com/wfu-work/nav-common-go-lib/domains"
@@ -29,8 +32,13 @@ var (
 	modelPricingService = services.ModelPricingServiceApp
 	quotaService        = services.QuotaServiceApp
 	requestLogService   = services.RequestLogServiceApp
-	proxyService        = services.ProxyServiceApp
 )
+
+var proxyService proxyHandlerService = services.ProxyServiceApp
+
+type proxyHandlerService interface {
+	Handle(*http.Request, io.Writer, string, []byte, bool, services.ProxyIngressTiming) (services.ProxyOutput, error)
+}
 
 func queryParams(c *gin.Context) map[string]string {
 	query := c.Request.URL.Query()
