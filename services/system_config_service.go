@@ -39,39 +39,55 @@ func (s SystemConfigService) Get(key string) (domains.SystemConfig, bool) {
 
 // snapshot 返回短时缓存的完整运行配置，避免单个代理请求为每个配置项分别查询数据库。
 func (s SystemConfigService) snapshot() map[string]domains.SystemConfig {
+	values, _ := s.snapshotWithError()
+	return values
+}
+
+// snapshotWithError retains the last complete snapshot when a refresh fails.
+// Upstream requests must distinguish an unreadable config from an empty config.
+func (s SystemConfigService) snapshotWithError() (map[string]domains.SystemConfig, error) {
 	db := global.NAV_DB
 	if db == nil {
-		return map[string]domains.SystemConfig{}
+		return nil, nil
 	}
 	now := time.Now()
 	systemConfigCache.RLock()
 	if systemConfigCache.db == db && now.Before(systemConfigCache.expiresAt) {
 		values := systemConfigCache.values
 		systemConfigCache.RUnlock()
-		return values
+		return values, nil
 	}
 	systemConfigCache.RUnlock()
 
 	systemConfigCache.Lock()
 	defer systemConfigCache.Unlock()
 	if systemConfigCache.db == db && now.Before(systemConfigCache.expiresAt) {
-		return systemConfigCache.values
+		return systemConfigCache.values, nil
+	}
+	lastSnapshot := func(err error) (map[string]domains.SystemConfig, error) {
+		if systemConfigCache.db == db {
+			return systemConfigCache.values, err
+		}
+		return nil, err
 	}
 	if !db.Migrator().HasTable(&domains.SystemConfig{}) {
-		return map[string]domains.SystemConfig{}
+		return lastSnapshot(errors.New("system config table is unavailable"))
 	}
 	var items []domains.SystemConfig
 	if err := db.Find(&items).Error; err != nil {
-		return map[string]domains.SystemConfig{}
+		return lastSnapshot(errors.New("system config could not be read"))
 	}
 	values := make(map[string]domains.SystemConfig, len(items))
 	for _, item := range items {
 		values[item.ConfigKey] = item
 	}
+	if err := protectProxySnapshot(db, values); err != nil {
+		return lastSnapshot(err)
+	}
 	systemConfigCache.db = db
 	systemConfigCache.values = values
 	systemConfigCache.expiresAt = now.Add(2 * time.Second)
-	return values
+	return values, nil
 }
 
 func (s SystemConfigService) GetString(key, fallback string) string {
@@ -139,38 +155,61 @@ func (s SystemConfigService) set(group, key, value, valueType, remark string) er
 	if key == "" {
 		return nil
 	}
+	return s.SetValues([]domains.SystemConfig{{
+		ConfigKey: key, ConfigValue: value, ValueType: valueType,
+		Group: strings.TrimSpace(group), Remark: strings.TrimSpace(remark),
+	}})
+}
+
+// SetValues commits related settings together; readers never see half a proxy policy.
+func (s SystemConfigService) SetValues(values []domains.SystemConfig) error {
 	if !systemConfigTableReady() {
 		return errors.New("system config table is not ready")
 	}
-	var item domains.SystemConfig
-	err := global.NAV_DB.Where("config_key = ?", key).First(&item).Error
-	if err == nil {
-		err = global.NAV_DB.Model(&item).Updates(map[string]any{
-			"config_value": value,
-			"value_type":   valueType,
-			"group":        strings.TrimSpace(group),
-			"remark":       strings.TrimSpace(remark),
-		}).Error
-		if err == nil {
-			invalidateSystemConfigCache()
+	protected := append([]domains.SystemConfig(nil), values...)
+	for index, value := range protected {
+		if value.ConfigKey != systemConfigUpstreamProxyURL || strings.HasPrefix(value.ConfigValue, proxySecretPrefix) {
+			continue
 		}
-		return err
+		encrypted, err := encryptProxyURL(strings.TrimSpace(value.ConfigValue), Config().SecretKeyFile)
+		if err != nil {
+			return err
+		}
+		protected[index].ConfigValue = encrypted
+		if strings.HasPrefix(encrypted, proxySecretPrefix) {
+			protected[index].ValueType = "secret"
+		}
 	}
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	item = domains.SystemConfig{
-		ConfigKey:   key,
-		ConfigValue: value,
-		ValueType:   valueType,
-		Group:       strings.TrimSpace(group),
-		Remark:      strings.TrimSpace(remark),
-	}
-	err = global.NAV_DB.Create(&item).Error
+	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
+		for _, value := range protected {
+			if err := setSystemConfigValue(tx, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err == nil {
 		invalidateSystemConfigCache()
 	}
 	return err
+}
+
+func setSystemConfigValue(db *gorm.DB, value domains.SystemConfig) error {
+	var item domains.SystemConfig
+	err := db.Unscoped().Where("config_key = ?", value.ConfigKey).First(&item).Error
+	if err == nil {
+		return db.Unscoped().Model(&item).Updates(map[string]any{
+			"config_value": value.ConfigValue,
+			"value_type":   value.ValueType,
+			"group":        value.Group,
+			"remark":       value.Remark,
+			"deleted_time": nil,
+		}).Error
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return db.Create(&value).Error
 }
 
 func invalidateSystemConfigCache() {

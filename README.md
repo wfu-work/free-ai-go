@@ -176,6 +176,10 @@ system:
 
 freeai:
   proxy-prefix: /v1
+  # 静态出口代理；后台「系统设置 → 网关配置」保存的值优先于 YAML。
+  upstream-proxy-enabled: false
+  upstream-proxy-required: false
+  upstream-proxy-url: ""
   # 非流式请求的总超时；流式请求仅限制首个 SSE 的等待时间。
   request-timeout-seconds: 120
   # 流式响应开始后，连续没有新 SSE 事件的最大时长。
@@ -198,6 +202,49 @@ freeai:
   quota-default-reserve-tokens: 8192
   quota-reservation-ttl-seconds: 1800
 ```
+
+使用静态出口 IP 时，在「网关配置 → 上游代理」填写服务商提供的代理主机和
+端口，例如 `socks5://代理主机:端口`，也支持 `http` 和 `https`。在独立的
+「认证用户名」「认证密码」中填写认证信息，无需手动 URL 编码。接口仍兼容
+完整的 `socks5://用户名:密码@代理主机:端口` 地址，其中的特殊字符需要 URL 编码。
+代理地址是服务商提供的连接入口，实际出口 IP 可能与入口地址不同。
+
+先点击「测试代理」，核对实际出口 IP 是否与购买的静态 IP 一致，再开启
+「开启后端上游代理」与「必须使用代理」并保存。测试不会保存配置，也不会
+携带 OpenAI API Key 或 OAuth 凭据；它通过独立代理客户端并行检查出口 IP、
+ChatGPT/Codex、OpenAI API 和 OpenAI 认证，最长等待 12 秒。HTTP 401 表示已
+连接到目标但未验证账号权限；403 表示访问受限。测试成功不代表账号或模型可用。
+
+管理接口为 `POST /api/ops/upstream-proxy-test`（`/api` 由 `system.router-prefix`
+决定），请求体为 `{"upstreamProxyUrl":"socks5://代理主机:端口","upstreamProxyCredentials":{"username":"用户","password":"密码"}}`，
+返回出口 IP、各目标状态码与耗时；返回的代理地址不包含用户名和密码。
+该接口沿用后台接口的认证与权限控制。
+
+带认证的代理地址使用项目现有 AES-GCM 加密后保存到数据库，读取与保存响应
+只返回不含用户名和密码的地址，以及 `upstreamProxyHasCredentials` 状态。
+不传 `upstreamProxyCredentials` 时，同一代理入口会沿用已保存认证；更换入口
+需要重新填写认证，或显式传入 `upstreamProxyClearCredentials: true` 清除认证。
+测试接口遵循相同规则，因此测试已保存代理时无需将密码返回浏览器。
+
+浏览器不再持久缓存网关配置，启动时清除旧版 localStorage/sessionStorage 中的
+网关缓存；新输入的密码仅保留在当前页面内存中，保存成功后清空。配置和测试
+接口返回 `Cache-Control: no-store`。数据库中已有的有效明文代理配置在读取时
+自动加密迁移；YAML 中的旧明文认证会迁入数据库，但不会改写原 YAML 文件，
+请改用后台录入并移除 YAML 中的明文认证。无数据库模式可读取 `aesgcm:` 密文配置。
+
+核心备份的 `gatewayConfig` 仅包含脱敏地址，`data.systemConfigs` 保留加密代理
+配置；主密钥内容不包含在备份中。恢复加密凭据需要原 `secret-key-file` 文件
+（默认 `./data/master.key`），跨服务器恢复时应单独复制该文件并配置目标机器的
+本地路径；替换主密钥文件后需重启服务，避免继续使用进程中已缓存的旧密钥。
+恢复不会覆盖目标机器的主密钥路径。旧版明文代理备份会在导入时
+加密；密钥不匹配、备份代理配置冲突或保存失败时拒绝恢复并保留原配置。
+
+开启「必须使用代理」后，关闭代理开关、缺少地址或无效配置会阻止上游请求。
+数据库读取失败时继续使用该实例已加载的有效代理；没有可用代理快照时阻止
+请求，禁止回退直连。代理连接失败同样不会切换到直连。代理相关设置与其他
+网关设置在同一个数据库事务中保存，保存失败时保留原配置。配置按实例缓存
+最多 2 秒，重启后会重新读取；只有已持久化的设置才能在重启后恢复。
+这项配置覆盖本项目的模型请求、图片生成、OAuth 刷新、模型目录和额度同步。
 
 `session_affinity` 会优先读取请求头 `X-FreeAI-Affinity-Key`，也支持请求体中的
 `conversation`、`conversation_id`、`session_id`、`prompt_cache_key`、`metadata`

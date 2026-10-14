@@ -8,6 +8,7 @@ func (r OpsRouter) InitOpsRouter(group *gin.RouterGroup) {
 	group.GET("ops/metrics", opsApi.Metrics)
 	group.GET("ops/gateway-config", opsApi.GatewayConfig)
 	group.PUT("ops/gateway-config", opsApi.SaveGatewayConfig)
+	group.POST("ops/upstream-proxy-test", opsApi.TestUpstreamProxy)
 	group.GET("ops/stats", opsApi.Stats)
 	group.GET("ops/usage", opsApi.Usage)
 	group.GET("ops/routes", opsApi.Routes)

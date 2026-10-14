@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/spf13/cast"
+	"github.com/wfu-work/free-ai-go/domains"
 	"github.com/wfu-work/nav-common-go-lib/global"
 )
 
@@ -25,6 +27,7 @@ type GatewayConfig struct {
 	SecretKeyFile              string
 	LogPromptContent           bool
 	UpstreamProxyEnabled       bool
+	UpstreamProxyRequired      bool
 	UpstreamProxyURL           string
 	MaxRequestBodyBytes        int64
 	MaxConcurrentRequests      int
@@ -36,21 +39,25 @@ type GatewayConfig struct {
 }
 
 type GatewayProxyConfigInput struct {
-	ListenAddress               string `json:"listenAddress"`
-	AccountSelectionStrategy    string `json:"accountSelectionStrategy"`
-	Originator                  string `json:"originator"`
-	Residency                   string `json:"residency"`
-	UpstreamProxyEnabled        bool   `json:"upstreamProxyEnabled"`
-	UpstreamProxyURL            string `json:"upstreamProxyUrl"`
-	SSEKeepAliveMs              int64  `json:"sseKeepAliveMs"`
-	UpstreamTimeoutMs           int64  `json:"upstreamTimeoutMs"`
-	UpstreamStreamIdleTimeoutMs int64  `json:"upstreamStreamIdleTimeoutMs"`
-	MaxConcurrentRequests       *int   `json:"maxConcurrentRequests,omitempty"`
-	MaxRequestBodyMiB           *int64 `json:"maxRequestBodyMiB,omitempty"`
-	MaxRetries                  *int   `json:"maxRetries,omitempty"`
-	OverloadQueueTimeoutMs      *int64 `json:"overloadQueueTimeoutMs,omitempty"`
-	ContextCompactionEnabled    bool   `json:"contextCompactionEnabled"`
-	ContextCompactionThreshold  int64  `json:"contextCompactionThresholdTokens"`
+	ListenAddress                 string                         `json:"listenAddress"`
+	AccountSelectionStrategy      string                         `json:"accountSelectionStrategy"`
+	Originator                    string                         `json:"originator"`
+	Residency                     string                         `json:"residency"`
+	UpstreamProxyEnabled          bool                           `json:"upstreamProxyEnabled"`
+	UpstreamProxyRequired         *bool                          `json:"upstreamProxyRequired,omitempty"`
+	UpstreamProxyURL              string                         `json:"upstreamProxyUrl"`
+	UpstreamProxyHasCredentials   bool                           `json:"upstreamProxyHasCredentials"`
+	UpstreamProxyCredentials      *UpstreamProxyCredentialsInput `json:"upstreamProxyCredentials,omitempty"`
+	UpstreamProxyClearCredentials bool                           `json:"upstreamProxyClearCredentials,omitempty"`
+	SSEKeepAliveMs                int64                          `json:"sseKeepAliveMs"`
+	UpstreamTimeoutMs             int64                          `json:"upstreamTimeoutMs"`
+	UpstreamStreamIdleTimeoutMs   int64                          `json:"upstreamStreamIdleTimeoutMs"`
+	MaxConcurrentRequests         *int                           `json:"maxConcurrentRequests,omitempty"`
+	MaxRequestBodyMiB             *int64                         `json:"maxRequestBodyMiB,omitempty"`
+	MaxRetries                    *int                           `json:"maxRetries,omitempty"`
+	OverloadQueueTimeoutMs        *int64                         `json:"overloadQueueTimeoutMs,omitempty"`
+	ContextCompactionEnabled      bool                           `json:"contextCompactionEnabled"`
+	ContextCompactionThreshold    int64                          `json:"contextCompactionThresholdTokens"`
 }
 
 type gatewayCapacityConfig struct {
@@ -80,6 +87,7 @@ const (
 	systemConfigSecretKeyFile              = "freeai.secret-key-file"
 	systemConfigLogPromptContent           = "freeai.log-prompt-content"
 	systemConfigUpstreamProxyEnabled       = "freeai.upstream-proxy-enabled"
+	systemConfigUpstreamProxyRequired      = "freeai.upstream-proxy-required"
 	systemConfigUpstreamProxyURL           = "freeai.upstream-proxy-url"
 	systemConfigMaxRequestBodyBytes        = "freeai.max-request-body-bytes"
 	systemConfigMaxConcurrentRequests      = "freeai.max-concurrent-requests"
@@ -115,6 +123,14 @@ const (
 )
 
 func Config() GatewayConfig {
+	cfg := baseGatewayConfig()
+	applySystemConfigOverrides(&cfg)
+	cfg.CleanupLogRetentionDays = normalizeCleanupLogRetentionDays(cfg.CleanupLogRetentionDays)
+	cfg.ContextCompactionThreshold = normalizeContextCompactionThreshold(cfg.ContextCompactionThreshold)
+	return cfg
+}
+
+func baseGatewayConfig() GatewayConfig {
 	m := map[string]any{}
 	if global.NAV_VIPER != nil {
 		m = global.NAV_VIPER.GetStringMap("freeai")
@@ -137,6 +153,7 @@ func Config() GatewayConfig {
 		SecretKeyFile:              stringDefault(cast.ToString(m["secret-key-file"]), "./data/master.key"),
 		LogPromptContent:           cast.ToBool(m["log-prompt-content"]),
 		UpstreamProxyEnabled:       cast.ToBool(m["upstream-proxy-enabled"]),
+		UpstreamProxyRequired:      cast.ToBool(m["upstream-proxy-required"]),
 		UpstreamProxyURL:           strings.TrimSpace(cast.ToString(m["upstream-proxy-url"])),
 		MaxRequestBodyBytes:        int64Default(cast.ToInt64(m["max-request-body-bytes"]), 8*1024*1024),
 		MaxConcurrentRequests:      intDefault(cast.ToInt(m["max-concurrent-requests"]), 128),
@@ -146,9 +163,6 @@ func Config() GatewayConfig {
 		ContextCompactionEnabled:   contextCompactionEnabled,
 		ContextCompactionThreshold: int64Default(cast.ToInt64(m["context-compaction-threshold-tokens"]), defaultContextCompactionThreshold),
 	}
-	applySystemConfigOverrides(&cfg)
-	cfg.CleanupLogRetentionDays = normalizeCleanupLogRetentionDays(cfg.CleanupLogRetentionDays)
-	cfg.ContextCompactionThreshold = normalizeContextCompactionThreshold(cfg.ContextCompactionThreshold)
 	return cfg
 }
 
@@ -176,6 +190,7 @@ func applySystemConfigOverrides(cfg *GatewayConfig) {
 	cfg.SecretKeyFile = SystemConfigServiceApp.GetString(systemConfigSecretKeyFile, cfg.SecretKeyFile)
 	cfg.LogPromptContent = SystemConfigServiceApp.GetBool(systemConfigLogPromptContent, cfg.LogPromptContent)
 	cfg.UpstreamProxyEnabled = SystemConfigServiceApp.GetBool(systemConfigUpstreamProxyEnabled, cfg.UpstreamProxyEnabled)
+	cfg.UpstreamProxyRequired = SystemConfigServiceApp.GetBool(systemConfigUpstreamProxyRequired, cfg.UpstreamProxyRequired)
 	cfg.UpstreamProxyURL = strings.TrimSpace(SystemConfigServiceApp.GetString(systemConfigUpstreamProxyURL, cfg.UpstreamProxyURL))
 	cfg.MaxRequestBodyBytes = SystemConfigServiceApp.GetInt64(systemConfigMaxRequestBodyBytes, cfg.MaxRequestBodyBytes)
 	cfg.MaxConcurrentRequests = SystemConfigServiceApp.GetInt(systemConfigMaxConcurrentRequests, cfg.MaxConcurrentRequests)
@@ -210,24 +225,77 @@ func (c GatewayConfig) EffectiveUpstreamProxyURL() string {
 }
 
 func UpstreamHTTPClient() (*http.Client, error) {
-	return upstreamHTTPClientForProxy(Config().EffectiveUpstreamProxyURL())
+	cfg := baseGatewayConfig()
+	values, err := SystemConfigServiceApp.snapshotWithError()
+	if err != nil && values == nil {
+		return nil, errors.New("upstream requests blocked: proxy configuration is unavailable")
+	}
+	for key, target := range map[string]*bool{
+		systemConfigUpstreamProxyEnabled:  &cfg.UpstreamProxyEnabled,
+		systemConfigUpstreamProxyRequired: &cfg.UpstreamProxyRequired,
+	} {
+		if item, ok := values[key]; ok {
+			value, parseErr := strconv.ParseBool(strings.TrimSpace(item.ConfigValue))
+			if parseErr != nil {
+				return nil, errors.New("upstream requests blocked: proxy policy is invalid")
+			}
+			*target = value
+		}
+	}
+	if item, ok := values[systemConfigUpstreamProxyURL]; ok {
+		cfg.UpstreamProxyURL = strings.TrimSpace(item.ConfigValue)
+	}
+	if item, ok := values[systemConfigSecretKeyFile]; ok {
+		cfg.SecretKeyFile = item.ConfigValue
+	}
+	if err != nil && !cfg.UpstreamProxyEnabled {
+		return nil, errors.New("upstream requests blocked: proxy configuration is unavailable")
+	}
+	if cfg.UpstreamProxyRequired && !cfg.UpstreamProxyEnabled {
+		return nil, errors.New("upstream requests blocked: a proxy is required")
+	}
+	if cfg.UpstreamProxyEnabled && strings.TrimSpace(cfg.UpstreamProxyURL) == "" {
+		return nil, errors.New("upstream requests blocked: proxy address is missing")
+	}
+	proxyURL, decryptErr := decryptProxyURL(cfg.EffectiveUpstreamProxyURL(), cfg.SecretKeyFile)
+	if decryptErr != nil {
+		return nil, decryptErr
+	}
+	return upstreamHTTPClientForProxy(proxyURL)
 }
 
 func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
+	upstreamHTTPClientCache.Lock()
+	defer upstreamHTTPClientCache.Unlock()
+	if upstreamHTTPClientCache.client != nil && upstreamHTTPClientCache.proxyURL == proxyURL {
+		return upstreamHTTPClientCache.client, nil
+	}
+	client, err := newUpstreamHTTPClient(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if upstreamHTTPClientCache.transport != nil {
+		upstreamHTTPClientCache.transport.CloseIdleConnections()
+	}
+	upstreamHTTPClientCache.proxyURL = proxyURL
+	upstreamHTTPClientCache.client = client
+	upstreamHTTPClientCache.transport = client.Transport.(*http.Transport)
+	return client, nil
+}
+
+func newUpstreamHTTPClient(proxyURL string) (*http.Client, error) {
 	var parsedProxy *url.URL
 	if proxyURL != "" {
+		if err := validateProxyURL(proxyURL); err != nil {
+			return nil, err
+		}
 		parsed, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, err
 		}
 		parsedProxy = parsed
-	}
-
-	upstreamHTTPClientCache.Lock()
-	defer upstreamHTTPClientCache.Unlock()
-	if upstreamHTTPClientCache.client != nil && upstreamHTTPClientCache.proxyURL == proxyURL {
-		return upstreamHTTPClientCache.client, nil
+		parsedProxy.Scheme = strings.ToLower(parsedProxy.Scheme)
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -240,18 +308,22 @@ func upstreamHTTPClientForProxy(proxyURL string) (*http.Client, error) {
 	if parsedProxy != nil {
 		transport.Proxy = http.ProxyURL(parsedProxy)
 	}
-	client := &http.Client{Transport: transport}
-	if upstreamHTTPClientCache.transport != nil {
-		upstreamHTTPClientCache.transport.CloseIdleConnections()
-	}
-	upstreamHTTPClientCache.proxyURL = proxyURL
-	upstreamHTTPClientCache.client = client
-	upstreamHTTPClientCache.transport = transport
-	return client, nil
+	return &http.Client{Transport: transport}, nil
 }
 
 func GatewayProxyConfig() GatewayProxyConfigInput {
+	config, _ := GatewayProxyConfigWithError()
+	return config
+}
+
+func GatewayProxyConfigWithError() (GatewayProxyConfigInput, error) {
+	values, snapshotErr := SystemConfigServiceApp.snapshotWithError()
+	if snapshotErr != nil && values == nil {
+		return GatewayProxyConfigInput{}, errors.New("gateway configuration is unavailable")
+	}
 	cfg := Config()
+	proxyURL, err := decryptProxyURL(cfg.UpstreamProxyURL, cfg.SecretKeyFile)
+	endpoint, hasCredentials := proxyEndpoint(proxyURL)
 	maxRequestBodyMiB := bytesToMiB(cfg.MaxRequestBodyBytes)
 	return GatewayProxyConfigInput{
 		ListenAddress:               SystemConfigServiceApp.GetString(systemConfigGatewayListenAddress, "127.0.0.1"),
@@ -259,7 +331,9 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 		Originator:                  SystemConfigServiceApp.GetString(systemConfigGatewayOriginator, "codex_cli_rs"),
 		Residency:                   SystemConfigServiceApp.GetString(systemConfigGatewayResidency, ""),
 		UpstreamProxyEnabled:        cfg.UpstreamProxyEnabled,
-		UpstreamProxyURL:            cfg.UpstreamProxyURL,
+		UpstreamProxyRequired:       &cfg.UpstreamProxyRequired,
+		UpstreamProxyURL:            endpoint,
+		UpstreamProxyHasCredentials: hasCredentials,
 		SSEKeepAliveMs:              SystemConfigServiceApp.GetInt64(systemConfigGatewaySSEKeepAliveMs, 15000),
 		UpstreamTimeoutMs:           SystemConfigServiceApp.GetInt64(systemConfigGatewayUpstreamTimeoutMs, cfg.RequestTimeoutSeconds*1000),
 		UpstreamStreamIdleTimeoutMs: SystemConfigServiceApp.GetInt64(systemConfigGatewayStreamIdleTimeoutMs, cfg.StreamIdleTimeoutSeconds*1000),
@@ -269,97 +343,115 @@ func GatewayProxyConfig() GatewayProxyConfigInput {
 		OverloadQueueTimeoutMs:      int64Ptr(cfg.OverloadQueueTimeoutMs),
 		ContextCompactionEnabled:    cfg.ContextCompactionEnabled,
 		ContextCompactionThreshold:  cfg.ContextCompactionThreshold,
-	}
+	}, err
 }
 
 func UpdateGatewayProxyConfig(input GatewayProxyConfigInput) (GatewayProxyConfigInput, error) {
-	input.AccountSelectionStrategy = gatewayAccountSelectionStrategy(routingStrategyFromGateway(input.AccountSelectionStrategy))
-	input.UpstreamProxyURL = strings.TrimSpace(input.UpstreamProxyURL)
-	if input.ContextCompactionThreshold == 0 {
-		input.ContextCompactionThreshold = defaultContextCompactionThreshold
-	}
-	if input.UpstreamTimeoutMs < 0 {
-		return GatewayProxyConfigInput{}, errors.New("upstreamTimeoutMs must be greater than or equal to 0")
-	}
-	if input.ContextCompactionThreshold < minContextCompactionThreshold || input.ContextCompactionThreshold > maxContextCompactionThreshold {
-		return GatewayProxyConfigInput{}, errors.New("contextCompactionThresholdTokens must be between 80000 and 120000")
-	}
-	capacity, err := resolveGatewayCapacity(input, Config())
-	if err != nil {
-		return GatewayProxyConfigInput{}, err
-	}
-	if input.UpstreamProxyEnabled {
-		if input.UpstreamProxyURL == "" {
-			return GatewayProxyConfigInput{}, errors.New("upstreamProxyUrl is required when upstream proxy is enabled")
-		}
-		if err := validateProxyURL(input.UpstreamProxyURL); err != nil {
-			return GatewayProxyConfigInput{}, err
-		}
-	}
 	global.Lock.Lock()
 	defer global.Lock.Unlock()
-	if err := SystemConfigServiceApp.SetBool(systemConfigGroupGateway, systemConfigUpstreamProxyEnabled, input.UpstreamProxyEnabled, "上游代理开关"); err != nil {
-		return GatewayProxyConfigInput{}, err
-	}
-	if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, systemConfigUpstreamProxyURL, input.UpstreamProxyURL, "上游代理地址"); err != nil {
-		return GatewayProxyConfigInput{}, err
-	}
-	if err := SystemConfigServiceApp.SetBool(systemConfigGroupGateway, systemConfigContextCompactionEnabled, input.ContextCompactionEnabled, "自动上下文压缩开关"); err != nil {
-		return GatewayProxyConfigInput{}, err
-	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigContextCompactionThreshold, input.ContextCompactionThreshold, "自动上下文压缩 Token 阈值"); err != nil {
+	cfg := Config()
+	input, capacity, err := normalizeGatewayProxyConfig(input, cfg)
+	if err != nil {
 		return GatewayProxyConfigInput{}, err
 	}
 	if err := updateGatewayRuntimeConfig(input, capacity); err != nil {
 		return GatewayProxyConfigInput{}, err
 	}
-	return GatewayProxyConfig(), nil
+	return GatewayProxyConfigWithError()
+}
+
+func normalizeGatewayProxyConfig(input GatewayProxyConfigInput, cfg GatewayConfig) (GatewayProxyConfigInput, gatewayCapacityConfig, error) {
+	invalid := func(err error) (GatewayProxyConfigInput, gatewayCapacityConfig, error) {
+		return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, err
+	}
+	if input.UpstreamProxyRequired == nil {
+		input.UpstreamProxyRequired = &cfg.UpstreamProxyRequired
+	}
+	if *input.UpstreamProxyRequired && !input.UpstreamProxyEnabled {
+		return invalid(errors.New("upstream proxy must be enabled when a proxy is required"))
+	}
+	input.AccountSelectionStrategy = gatewayAccountSelectionStrategy(routingStrategyFromGateway(input.AccountSelectionStrategy))
+	proxyURL, err := resolveProxyCredentials(input.UpstreamProxyURL, input.UpstreamProxyCredentials, input.UpstreamProxyClearCredentials, cfg)
+	if err != nil {
+		return invalid(err)
+	}
+	input.UpstreamProxyURL = proxyURL
+	if input.ContextCompactionThreshold == 0 {
+		input.ContextCompactionThreshold = defaultContextCompactionThreshold
+	}
+	if input.UpstreamTimeoutMs < 0 {
+		return invalid(errors.New("upstreamTimeoutMs must be greater than or equal to 0"))
+	}
+	if input.ContextCompactionThreshold < minContextCompactionThreshold || input.ContextCompactionThreshold > maxContextCompactionThreshold {
+		return invalid(errors.New("contextCompactionThresholdTokens must be between 80000 and 120000"))
+	}
+	capacity, err := resolveGatewayCapacity(input, cfg)
+	if err != nil {
+		return invalid(err)
+	}
+	if input.UpstreamProxyEnabled {
+		if input.UpstreamProxyURL == "" {
+			return invalid(errors.New("upstreamProxyUrl is required when upstream proxy is enabled"))
+		}
+		if err := validateProxyURL(input.UpstreamProxyURL); err != nil {
+			return invalid(err)
+		}
+	}
+	input.UpstreamProxyURL, err = encryptProxyURL(input.UpstreamProxyURL, cfg.SecretKeyFile)
+	if err != nil {
+		return invalid(err)
+	}
+	input.UpstreamProxyCredentials = nil
+	input.UpstreamProxyClearCredentials = false
+	return input, capacity, nil
 }
 
 func updateGatewayRuntimeConfig(input GatewayProxyConfigInput, capacity gatewayCapacityConfig) error {
+	return SystemConfigServiceApp.SetValues(gatewayRuntimeConfigValues(input, capacity))
+}
+
+func gatewayRuntimeConfigValues(input GatewayProxyConfigInput, capacity gatewayCapacityConfig) []domains.SystemConfig {
 	values := []struct {
 		key    string
 		value  string
 		remark string
 	}{
+		{systemConfigUpstreamProxyEnabled, strconv.FormatBool(input.UpstreamProxyEnabled), "上游代理开关"},
+		{systemConfigUpstreamProxyRequired, strconv.FormatBool(*input.UpstreamProxyRequired), "必须使用上游代理"},
+		{systemConfigUpstreamProxyURL, input.UpstreamProxyURL, "上游代理地址"},
+		{systemConfigContextCompactionEnabled, strconv.FormatBool(input.ContextCompactionEnabled), "自动上下文压缩开关"},
+		{systemConfigContextCompactionThreshold, strconv.FormatInt(input.ContextCompactionThreshold, 10), "自动上下文压缩 Token 阈值"},
 		{systemConfigGatewayListenAddress, normalizeListenAddress(input.ListenAddress), "网关监听地址"},
 		{systemConfigGatewayAccountSelection, stringDefault(strings.TrimSpace(input.AccountSelectionStrategy), gatewayStrategyOrdered), "账号选择策略"},
 		{systemConfigRoutingStrategy, routingStrategyFromGateway(input.AccountSelectionStrategy), "账号池路由策略"},
 		{systemConfigGatewayOriginator, stringDefault(strings.TrimSpace(input.Originator), "codex_cli_rs"), "上游 Originator"},
 		{systemConfigGatewayResidency, strings.TrimSpace(input.Residency), "区域驻留要求"},
+		{systemConfigGatewaySSEKeepAliveMs, strconv.FormatInt(int64Default(input.SSEKeepAliveMs, 15000), 10), "SSE 保活间隔"},
+		{systemConfigGatewayUpstreamTimeoutMs, strconv.FormatInt(input.UpstreamTimeoutMs, 10), "上游首响应超时"},
+		{systemConfigRequestTimeoutSeconds, strconv.FormatInt(timeoutMillisecondsToSeconds(input.UpstreamTimeoutMs), 10), "非流式总超时 / 流式首响应超时秒数"},
+		{systemConfigGatewayStreamIdleTimeoutMs, strconv.FormatInt(int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000), 10), "上游流式空闲超时"},
+		{systemConfigStreamIdleTimeoutSeconds, strconv.FormatInt(int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000)/1000, 10), "上游流式空闲超时秒数"},
+		{systemConfigMaxConcurrentRequests, strconv.Itoa(capacity.MaxConcurrentRequests), "网关最大并发请求数"},
+		{systemConfigMaxRequestBodyBytes, strconv.FormatInt(capacity.MaxRequestBodyBytes, 10), "网关最大请求体字节数"},
+		{systemConfigMaxRetries, strconv.Itoa(capacity.MaxRetries), "上游故障切换重试次数"},
+		{systemConfigOverloadQueueTimeoutMs, strconv.FormatInt(capacity.OverloadQueueTimeoutMs, 10), "网关过载排队时间毫秒"},
 	}
+	entries := make([]domains.SystemConfig, 0, len(values))
 	for _, item := range values {
-		if err := SystemConfigServiceApp.SetString(systemConfigGroupGateway, item.key, item.value, item.remark); err != nil {
-			return err
+		valueType := systemConfigTypeString
+		switch item.key {
+		case systemConfigUpstreamProxyURL:
+			if strings.HasPrefix(item.value, proxySecretPrefix) {
+				valueType = "secret"
+			}
+		case systemConfigUpstreamProxyEnabled, systemConfigUpstreamProxyRequired, systemConfigContextCompactionEnabled:
+			valueType = systemConfigTypeBool
+		case systemConfigContextCompactionThreshold, systemConfigGatewaySSEKeepAliveMs, systemConfigGatewayUpstreamTimeoutMs, systemConfigRequestTimeoutSeconds, systemConfigGatewayStreamIdleTimeoutMs, systemConfigStreamIdleTimeoutSeconds, systemConfigMaxConcurrentRequests, systemConfigMaxRequestBodyBytes, systemConfigMaxRetries, systemConfigOverloadQueueTimeoutMs:
+			valueType = "int64"
 		}
+		entries = append(entries, domains.SystemConfig{ConfigKey: item.key, ConfigValue: item.value, ValueType: valueType, Group: systemConfigGroupGateway, Remark: item.remark})
 	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewaySSEKeepAliveMs, int64Default(input.SSEKeepAliveMs, 15000), "SSE 保活间隔"); err != nil {
-		return err
-	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayUpstreamTimeoutMs, input.UpstreamTimeoutMs, "上游首响应超时"); err != nil {
-		return err
-	}
-	requestTimeoutSeconds := timeoutMillisecondsToSeconds(input.UpstreamTimeoutMs)
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigRequestTimeoutSeconds, requestTimeoutSeconds, "非流式总超时 / 流式首响应超时秒数"); err != nil {
-		return err
-	}
-	streamIdleMs := int64Default(input.UpstreamStreamIdleTimeoutMs, 1800000)
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigGatewayStreamIdleTimeoutMs, streamIdleMs, "上游流式空闲超时"); err != nil {
-		return err
-	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigStreamIdleTimeoutSeconds, streamIdleMs/1000, "上游流式空闲超时秒数"); err != nil {
-		return err
-	}
-	if err := SystemConfigServiceApp.SetInt(systemConfigGroupGateway, systemConfigMaxConcurrentRequests, capacity.MaxConcurrentRequests, "网关最大并发请求数"); err != nil {
-		return err
-	}
-	if err := SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigMaxRequestBodyBytes, capacity.MaxRequestBodyBytes, "网关最大请求体字节数"); err != nil {
-		return err
-	}
-	if err := SystemConfigServiceApp.SetInt(systemConfigGroupGateway, systemConfigMaxRetries, capacity.MaxRetries, "上游故障切换重试次数"); err != nil {
-		return err
-	}
-	return SystemConfigServiceApp.SetInt64(systemConfigGroupGateway, systemConfigOverloadQueueTimeoutMs, capacity.OverloadQueueTimeoutMs, "网关过载排队时间毫秒")
+	return entries
 }
 
 func timeoutMillisecondsToSeconds(timeoutMs int64) int64 {
@@ -476,15 +568,18 @@ func normalizeListenAddress(value string) string {
 func validateProxyURL(value string) error {
 	parsed, err := url.Parse(value)
 	if err != nil {
-		return err
+		return errors.New("proxy URL is invalid; URL-encode special characters in credentials")
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https", "socks5":
 	default:
 		return errors.New("proxy scheme must be http, https, or socks5")
 	}
-	if parsed.Host == "" {
+	if parsed.Hostname() == "" {
 		return errors.New("proxy host is required")
+	}
+	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("proxy URL must not contain a path, query, or fragment; URL-encode credentials")
 	}
 	return nil
 }

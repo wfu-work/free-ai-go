@@ -3,6 +3,7 @@ package apis
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,31 @@ import (
 )
 
 type OpsApi struct{}
+
+// TestUpstreamProxy tests an unsaved proxy against fixed external destinations.
+// @Summary 测试上游代理与出口 IP
+// @Tags 运维模块
+// @Security ApiKeyAuth
+// @Accept json
+// @Produce json
+// @Param input body services.UpstreamProxyTestInput true "代理地址"
+// @Success 200 {object} response.Response{data=services.UpstreamProxyTestResult}
+// @Router /ops/upstream-proxy-test [post]
+func (a OpsApi) TestUpstreamProxy(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
+	var input services.UpstreamProxyTestInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.FailWithMessage("代理测试请求无效", c)
+		return
+	}
+	result, err := services.TestUpstreamProxy(c.Request.Context(), input)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(result, c)
+}
 
 // Metrics 获取运维指标
 // @Summary 获取运维指标
@@ -58,7 +84,13 @@ func (a OpsApi) Metrics(c *gin.Context) {
 // @Success 200 {object} response.Response{data=object,msg=string}
 // @Router /ops/gateway-config [get]
 func (a OpsApi) GatewayConfig(c *gin.Context) {
-	response.Ok(services.GatewayProxyConfig(), c)
+	c.Header("Cache-Control", "no-store")
+	cfg, err := services.GatewayProxyConfigWithError()
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.Ok(cfg, c)
 }
 
 // SaveGatewayConfig 保存网关配置
@@ -71,9 +103,10 @@ func (a OpsApi) GatewayConfig(c *gin.Context) {
 // @Success 200 {object} response.Response{data=object,msg=string}
 // @Router /ops/gateway-config [put]
 func (a OpsApi) SaveGatewayConfig(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	var input services.GatewayProxyConfigInput
 	if err := c.ShouldBindJSON(&input); err != nil {
-		response.FailWithMessage(err.Error(), c)
+		response.FailWithMessage("网关配置请求无效", c)
 		return
 	}
 	cfg, err := services.UpdateGatewayProxyConfig(input)
@@ -261,6 +294,7 @@ func (a OpsApi) MasterKey(c *gin.Context) {
 // @Success 200 {object} services.CoreBackupPayload
 // @Router /ops/core-backup [get]
 func (a OpsApi) ExportCoreBackup(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	payload, err := services.BackupServiceApp.ExportCore()
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
@@ -287,9 +321,10 @@ func (a OpsApi) ExportCoreBackup(c *gin.Context) {
 // @Success 200 {object} response.Response{data=services.CoreBackupImportResult,msg=string}
 // @Router /ops/core-backup [post]
 func (a OpsApi) ImportCoreBackup(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	var payload services.CoreBackupPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
-		response.FailWithMessage(err.Error(), c)
+		response.FailWithMessage("备份请求无效", c)
 		return
 	}
 	result, err := services.BackupServiceApp.ImportCore(payload)

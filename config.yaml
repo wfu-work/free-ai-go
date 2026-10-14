@@ -35,6 +35,7 @@ freeai:
   secret-key-file: ./data/master.key
   log-prompt-content: false
   upstream-proxy-enabled: false
+  upstream-proxy-required: false
   upstream-proxy-url: ""
   max-request-body-bytes: 8388608
   max-concurrent-requests: 128

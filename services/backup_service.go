@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,10 +78,15 @@ type CoreBackupImportResult struct {
 }
 
 func (s BackupService) ExportCore() (CoreBackupPayload, error) {
+	gatewayConfig, err := GatewayProxyConfigWithError()
+	if err != nil {
+		return CoreBackupPayload{}, err
+	}
+	keyFile := Config().SecretKeyFile
 	payload := CoreBackupPayload{
 		Version:       CoreBackupVersion,
 		ExportedAt:    time.Now().UnixMilli(),
-		GatewayConfig: GatewayProxyConfig(),
+		GatewayConfig: gatewayConfig,
 	}
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.AccountGroups).Error; err != nil {
 		return payload, err
@@ -125,6 +131,37 @@ func (s BackupService) ExportCore() (CoreBackupPayload, error) {
 	if err := global.NAV_DB.Order("id asc").Find(&payload.Data.SystemConfigs).Error; err != nil {
 		return payload, err
 	}
+	// Keep both representations of proxy policy consistent, and protect legacy
+	// values even if a concurrent DB writer bypassed the normal save endpoint.
+	for index, item := range payload.Data.SystemConfigs {
+		switch item.ConfigKey {
+		case systemConfigUpstreamProxyURL:
+			plain, err := decryptProxyURL(item.ConfigValue, keyFile)
+			if err != nil {
+				return CoreBackupPayload{}, err
+			}
+			if !strings.HasPrefix(item.ConfigValue, proxySecretPrefix) {
+				payload.Data.SystemConfigs[index].ConfigValue, err = encryptProxyURL(plain, keyFile)
+				if err != nil {
+					return CoreBackupPayload{}, err
+				}
+			}
+			payload.GatewayConfig.UpstreamProxyURL, payload.GatewayConfig.UpstreamProxyHasCredentials = proxyEndpoint(plain)
+			if strings.HasPrefix(payload.Data.SystemConfigs[index].ConfigValue, proxySecretPrefix) {
+				payload.Data.SystemConfigs[index].ValueType = "secret"
+			}
+		case systemConfigUpstreamProxyEnabled, systemConfigUpstreamProxyRequired:
+			value, err := strconv.ParseBool(strings.TrimSpace(item.ConfigValue))
+			if err != nil {
+				return CoreBackupPayload{}, errors.New("backup proxy policy is invalid")
+			}
+			if item.ConfigKey == systemConfigUpstreamProxyEnabled {
+				payload.GatewayConfig.UpstreamProxyEnabled = value
+			} else {
+				payload.GatewayConfig.UpstreamProxyRequired = &value
+			}
+		}
+	}
 	return payload, nil
 }
 
@@ -132,8 +169,14 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 	if payload.Version != CoreBackupVersion {
 		return CoreBackupImportResult{}, errors.New("unsupported backup file version")
 	}
+	global.Lock.Lock()
+	defer global.Lock.Unlock()
+	gateway, capacity, err := prepareBackupProxyConfig(payload, Config())
+	if err != nil {
+		return CoreBackupImportResult{}, err
+	}
 	result := CoreBackupImportResult{}
-	err := global.NAV_DB.Transaction(func(tx *gorm.DB) error {
+	err = global.NAV_DB.Transaction(func(tx *gorm.DB) error {
 		accountGroups := make([]domains.AccountGroup, 0, len(payload.Data.AccountGroups))
 		for _, item := range payload.Data.AccountGroups {
 			item.Id = 0
@@ -212,25 +255,78 @@ func (s BackupService) ImportCore(payload CoreBackupPayload) (CoreBackupImportRe
 
 		systemConfigs := make([]domains.SystemConfig, 0, len(payload.Data.SystemConfigs))
 		for _, item := range payload.Data.SystemConfigs {
+			// The validated gateway policy is applied atomically below. Never
+			// import a source machine's master-key location into this machine.
+			if item.ConfigKey == systemConfigUpstreamProxyURL || item.ConfigKey == systemConfigUpstreamProxyEnabled || item.ConfigKey == systemConfigUpstreamProxyRequired || item.ConfigKey == systemConfigSecretKeyFile {
+				continue
+			}
 			item.Id = 0
 			systemConfigs = append(systemConfigs, item)
 		}
 		result.SystemConfigs, result.FailedSystemConfigs = upsertSystemConfigsSkipping(tx, systemConfigs, &result.Errors)
-
+		for _, item := range gatewayRuntimeConfigValues(gateway, capacity) {
+			if err := setSystemConfigValue(tx, item); err != nil {
+				return errors.New("backup gateway configuration could not be saved")
+			}
+		}
+		result.GatewayConfig = 1
 		return nil
 	})
 	if err != nil {
 		return CoreBackupImportResult{}, err
 	}
-	if _, err := UpdateGatewayProxyConfig(payload.GatewayConfig); err != nil {
-		result.FailedGatewayConfig = 1
-		appendImportError(&result.Errors, fmt.Sprintf("网关配置: %v", err))
-	} else {
-		result.GatewayConfig = 1
-	}
+	invalidateSystemConfigCache()
 	result.Success = result.AccountGroups + result.Accounts + result.AccountQuotas + result.ModelCatalogs + result.AccountModels + result.ModelExposures + result.PlatformKeys + result.RouteStates + result.SystemConfigs + result.GatewayConfig
 	result.Failed = result.FailedAccountGroups + result.FailedAccounts + result.FailedAccountQuotas + result.FailedModelCatalogs + result.FailedAccountModels + result.FailedModelExposures + result.FailedPlatformKeys + result.FailedRouteStates + result.FailedSystemConfigs + result.FailedGatewayConfig
 	return result, nil
+}
+
+func prepareBackupProxyConfig(payload CoreBackupPayload, current GatewayConfig) (GatewayProxyConfigInput, gatewayCapacityConfig, error) {
+	input := payload.GatewayConfig
+	seen := map[string]bool{}
+	for _, item := range payload.Data.SystemConfigs {
+		if item.ConfigKey != systemConfigUpstreamProxyURL && item.ConfigKey != systemConfigUpstreamProxyEnabled && item.ConfigKey != systemConfigUpstreamProxyRequired {
+			continue
+		}
+		if seen[item.ConfigKey] {
+			return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup contains duplicate proxy settings")
+		}
+		seen[item.ConfigKey] = true
+		if item.ConfigKey == systemConfigUpstreamProxyURL {
+			plain, err := decryptProxyURL(item.ConfigValue, current.SecretKeyFile)
+			if err != nil {
+				return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, err
+			}
+			endpoint, _ := proxyEndpoint(plain)
+			gatewayEndpoint, _ := proxyEndpoint(input.UpstreamProxyURL)
+			if input.UpstreamProxyURL != "" && gatewayEndpoint != endpoint {
+				return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup proxy endpoints do not match")
+			}
+			input.UpstreamProxyURL = plain
+			input.UpstreamProxyCredentials = nil
+			input.UpstreamProxyClearCredentials = false
+		} else {
+			value, err := strconv.ParseBool(strings.TrimSpace(item.ConfigValue))
+			if err != nil {
+				return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup proxy policy is invalid")
+			}
+			if item.ConfigKey == systemConfigUpstreamProxyRequired {
+				if input.UpstreamProxyRequired != nil && *input.UpstreamProxyRequired != value {
+					return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup proxy policies do not match")
+				}
+				input.UpstreamProxyRequired = &value
+			} else if input.UpstreamProxyEnabled != value {
+				return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup proxy policies do not match")
+			}
+		}
+	}
+	_, hasCredentials := proxyEndpoint(input.UpstreamProxyURL)
+	if input.UpstreamProxyHasCredentials && !hasCredentials && input.UpstreamProxyCredentials == nil {
+		return GatewayProxyConfigInput{}, gatewayCapacityConfig{}, errors.New("backup is missing encrypted proxy credentials")
+	}
+	// A backup restores its own authentication, never the destination's secret.
+	current.UpstreamProxyURL = ""
+	return normalizeGatewayProxyConfig(input, current)
 }
 
 func upsertSystemConfigsSkipping(tx *gorm.DB, items []domains.SystemConfig, errors *[]string) (int, int) {
