@@ -45,9 +45,12 @@ func shouldWaitForUpstreamCapacity(result *ProxyResult, err error, stream bool) 
 	if !shouldRetry(result, err, stream) {
 		return false
 	}
+	// Before any output, a response/header timeout is recoverable just like
+	// overload or rate limiting, including when there is only one account.
 	return IsTransientUpstreamCapacityError(result, err) ||
-		(result != nil && (result.StatusCode == http.StatusTooManyRequests || result.ErrorType == domains.ErrorRateLimited)) ||
-		classifyError(err) == domains.ErrorRateLimited
+		(result != nil && (result.StatusCode == http.StatusTooManyRequests ||
+			result.ErrorType == domains.ErrorRateLimited || result.ErrorType == domains.ErrorUpstreamTimeout)) ||
+		classifyError(err) == domains.ErrorRateLimited || classifyError(err) == domains.ErrorUpstreamTimeout
 }
 
 func upstreamRetryDelay(failures int, header http.Header) time.Duration {

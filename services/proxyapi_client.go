@@ -15,7 +15,9 @@ import (
 	"github.com/wfu-work/proxy-api-lib/chatgpt"
 	"github.com/wfu-work/proxy-api-lib/codec/chatcompletions"
 	responsescodec "github.com/wfu-work/proxy-api-lib/codec/responses"
+	"github.com/wfu-work/proxy-api-lib/codexauth"
 	"github.com/wfu-work/proxy-api-lib/openai"
+	"github.com/wfu-work/proxy-api-lib/transport"
 )
 
 type ProxyRequest struct {
@@ -69,6 +71,17 @@ type ProxyAPIClientImpl struct{}
 
 var ProxyAPIClientApp ProxyAPIClient = ProxyAPIClientImpl{}
 
+func modelChatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {
+	options := transport.DefaultHTTPOptions()
+	// Model calls already have gateway/model contexts for first response,
+	// stream idle time and the overall retry window. Hidden SDK deadlines
+	// must not cancel those calls earlier than the configured policy.
+	options.RequestTimeout = 0
+	options.ResponseHeaderTimeout = 0
+	options.StreamIdleTimeout = 0
+	return chatGPTClient(file, chatgpt.WithHTTPOptions(options))
+}
+
 func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req ProxyRequest) (*ProxyResult, error) {
 	if req.Endpoint == "/v1/images/generations" {
 		if account.ProductCode != domains.ProductOpenAIImages || account.CredentialType != domains.CredentialAPIKey {
@@ -90,7 +103,7 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 	if err != nil {
 		return apiErrorResult(err, time.Since(start).Milliseconds())
 	}
-	client, err := chatGPTClient(file)
+	client, err := modelChatGPTClient(file)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +114,7 @@ func (ProxyAPIClientImpl) Do(ctx context.Context, account domains.Account, req P
 		unauthorized, _ := apiErrorResult(err, time.Since(start).Milliseconds())
 		trace.networkResult(unauthorized, err)
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(ctx, account, true); refreshErr == nil {
-			client, _ = chatGPTClient(file)
+			client, _ = modelChatGPTClient(file)
 			preparationMs = time.Since(start).Milliseconds()
 			trace = newUpstreamRequestTrace()
 			result, err = client.Codex.Create(trace.context(ctx), accountRouteID(account, file), responseReq)
@@ -146,7 +159,7 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		err = streamContextError(streamCtx, ctx, err)
 		return apiErrorResult(err, time.Since(start).Milliseconds())
 	}
-	client, err := chatGPTClient(file)
+	client, err := modelChatGPTClient(file)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +170,7 @@ func (ProxyAPIClientImpl) Stream(ctx context.Context, account domains.Account, r
 		unauthorized, _ := apiErrorResult(err, time.Since(start).Milliseconds())
 		trace.networkResult(unauthorized, err)
 		if file, refreshErr := AccountServiceApp.ActiveAccountFile(streamCtx, account, true); refreshErr == nil {
-			client, _ = chatGPTClient(file)
+			client, _ = modelChatGPTClient(file)
 			preparationMs = time.Since(start).Milliseconds()
 			trace = newUpstreamRequestTrace()
 			upstream, err = client.Codex.Stream(trace.context(streamCtx), accountRouteID(account, file), responseReq)

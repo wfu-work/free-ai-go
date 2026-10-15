@@ -1776,7 +1776,7 @@ func sameAccountEmail(left, right string) bool {
 	return left != "" && right != "" && left == right
 }
 
-func chatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {
+func chatGPTClient(file *codexauth.AccountFile, options ...chatgpt.Option) (*chatgpt.Client, error) {
 	if file == nil || strings.TrimSpace(file.Tokens.AccessToken) == "" {
 		return nil, errors.New("OAuth access token is empty")
 	}
@@ -1784,11 +1784,12 @@ func chatGPTClient(file *codexauth.AccountFile) (*chatgpt.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return chatgpt.NewClient(
+	clientOptions := []chatgpt.Option{
 		chatgpt.WithHTTPClient(httpClient), chatgpt.WithAccessToken(file.Tokens.AccessToken),
 		chatgpt.WithOriginator(GatewayProxyConfig().Originator),
-		chatgpt.WithUserAgent(chatgpt.DefaultOriginator+"/"+codexClientVersion),
-	), nil
+		chatgpt.WithUserAgent(chatgpt.DefaultOriginator + "/" + codexClientVersion),
+	}
+	return chatgpt.NewClient(append(clientOptions, options...)...), nil
 }
 
 func accountRouteID(account domains.Account, file *codexauth.AccountFile) string {
